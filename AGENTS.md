@@ -1,0 +1,41 @@
+# AGENTS.md
+
+## Scope
+- This repo is a single Docker Compose deployment for mirroring an Obsidian vault from WebDAV and exposing it through `markdown-vault-mcp`.
+- There is no app source tree, test suite, CI workflow, or package/tooling manifest in this repo. Most changes should be limited to `compose.yaml`, `.env.example`, and `README.md`.
+
+## High-Value Files
+- `compose.yaml`: source of truth for service wiring, env vars, volumes, healthcheck, port mapping, and startup order.
+- `.env.example`: source of truth for required stack variables and expected defaults.
+- `README.md`: operational workflow for Portainer deploys and runtime verification.
+
+## Deployment Model
+- This stack is intended for Portainer Git stack deploys, not a local app dev loop.
+- `vault-init` must complete successfully before both `vault-sync` and `markdown-vault-mcp` start (`depends_on.condition: service_completed_successfully`). Preserve that ordering unless the deployment model changes.
+
+## Behavior That Is Easy To Break
+- Sync is intentionally one-way: `rclone sync` mirrors `NAS WebDAV -> /vault`. Do not introduce workflows that treat the Docker mirror as writable state.
+- `vault-sync` logs failures and keeps the previous mirror instead of deleting local data after a failed sync. Keep that failure behavior intact unless explicitly changing recovery semantics.
+- `markdown-vault-mcp` is deliberately read-only via `MARKDOWN_VAULT_MCP_READ_ONLY=true`.
+- Exclusions matter in two places:
+  - `rclone sync` excludes `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
+  - MCP excludes `.obsidian/**,.trash/**,.git/**,.webdav-sync-ready`
+
+## Runtime Facts
+- Host endpoint: `http://HOST:8019/mcp`
+- Container listens on `8000`; Compose publishes `8019:8000`.
+- Persistent volumes:
+  - `obsidian-knowledge-vault`: disposable local mirror of WebDAV
+  - `obsidian-knowledge-mcp-state`: persistent index, embeddings, and cache
+
+## Useful Commands
+- Validate Compose after edits: `docker compose --env-file .env.example config`
+- Check initial sync: `docker logs obsidian-vault-init`
+- Follow periodic sync: `docker logs -f obsidian-vault-sync`
+- Inspect mirrored files without the rclone entrypoint: `docker run --rm -v obsidian-knowledge-vault:/vault alpine find /vault -maxdepth 2 -type f`
+- Follow MCP logs: `docker logs -f markdown-vault-mcp`
+- Trigger an immediate sync loop iteration: `docker restart obsidian-vault-sync`
+
+## Editing Guidance
+- If you add or rename environment variables in `compose.yaml`, update `.env.example` and the variable table in `README.md` in the same change.
+- Keep security assumptions aligned with the current docs: no real `.env` in git, private repo, and do not expose port `8019` publicly without adding protection.

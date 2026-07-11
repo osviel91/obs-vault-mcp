@@ -1,0 +1,136 @@
+name: obsidian-knowledge
+
+services:
+  vault-init:
+    image: rclone/rclone:latest
+    container_name: obsidian-vault-init
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "Performing initial WebDAV synchronization..."
+        rclone sync nas-webdav:"${WEBDAV_REMOTE_PATH}" /vault \
+          --create-empty-src-dirs \
+          --delete-during \
+          --exclude "/.markdown_vault_mcp/**" \
+          --exclude "/.git/**" \
+          --exclude "/.trash/**" \
+          --transfers 4 \
+          --checkers 8 \
+          --retries 5 \
+          --low-level-retries 10 \
+          --log-level INFO
+        date -Iseconds > /vault/.webdav-sync-ready
+        echo "Initial synchronization completed."
+    environment:
+      RCLONE_CONFIG_NAS_WEBDAV_TYPE: webdav
+      RCLONE_CONFIG_NAS_WEBDAV_URL: ${WEBDAV_URL}
+      RCLONE_CONFIG_NAS_WEBDAV_VENDOR: ${WEBDAV_VENDOR}
+      RCLONE_CONFIG_NAS_WEBDAV_USER: ${WEBDAV_USERNAME}
+      RCLONE_CONFIG_NAS_WEBDAV_PASS: ${WEBDAV_PASSWORD_OBSCURED}
+      WEBDAV_REMOTE_PATH: ${WEBDAV_REMOTE_PATH}
+    volumes:
+      - vault-data:/vault
+    networks:
+      - knowledge-net
+
+  vault-sync:
+    image: rclone/rclone:latest
+    container_name: obsidian-vault-sync
+    restart: unless-stopped
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        while true; do
+          echo "Synchronizing vault from WebDAV..."
+          if rclone sync nas-webdav:"${WEBDAV_REMOTE_PATH}" /vault \
+            --create-empty-src-dirs \
+            --delete-during \
+            --exclude "/.markdown_vault_mcp/**" \
+            --exclude "/.git/**" \
+            --exclude "/.trash/**" \
+            --transfers 4 \
+            --checkers 8 \
+            --retries 5 \
+            --low-level-retries 10 \
+            --log-level INFO; then
+              date -Iseconds > /vault/.webdav-sync-ready
+              echo "Synchronization completed."
+          else
+              echo "Synchronization failed; preserving the previous local mirror."
+          fi
+          sleep "${SYNC_INTERVAL_SECONDS}"
+        done
+    environment:
+      RCLONE_CONFIG_NAS_WEBDAV_TYPE: webdav
+      RCLONE_CONFIG_NAS_WEBDAV_URL: ${WEBDAV_URL}
+      RCLONE_CONFIG_NAS_WEBDAV_VENDOR: ${WEBDAV_VENDOR}
+      RCLONE_CONFIG_NAS_WEBDAV_USER: ${WEBDAV_USERNAME}
+      RCLONE_CONFIG_NAS_WEBDAV_PASS: ${WEBDAV_PASSWORD_OBSCURED}
+      WEBDAV_REMOTE_PATH: ${WEBDAV_REMOTE_PATH}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
+    volumes:
+      - vault-data:/vault
+    networks:
+      - knowledge-net
+
+  markdown-vault-mcp:
+    image: ghcr.io/pvliesdonk/markdown-vault-mcp:latest
+    container_name: markdown-vault-mcp
+    restart: unless-stopped
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec markdown-vault-mcp serve
+        --transport http
+        --host 0.0.0.0
+        --port 8000
+        --http-path /mcp
+    environment:
+      MARKDOWN_VAULT_MCP_SOURCE_DIR: /data/vault
+      MARKDOWN_VAULT_MCP_READ_ONLY: "true"
+      MARKDOWN_VAULT_MCP_INDEX_PATH: /data/state/index.db
+      MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH: /data/state/embeddings
+      MARKDOWN_VAULT_MCP_KV_STORE_URL: file:///data/state/kv
+      MARKDOWN_VAULT_MCP_EXCLUDE: ".obsidian/**,.trash/**,.git/**,.webdav-sync-ready"
+      MARKDOWN_VAULT_MCP_EMBEDDING_PROVIDER: fastembed
+      MARKDOWN_VAULT_MCP_FASTEMBED_MODEL: BAAI/bge-small-en-v1.5
+      MARKDOWN_VAULT_MCP_FASTEMBED_CACHE_DIR: /data/state/fastembed
+      PUID: ${PUID}
+      PGID: ${PGID}
+    volumes:
+      - vault-data:/data/vault
+      - mcp-state:/data/state
+    ports:
+      - "8019:8000"
+    networks:
+      - knowledge-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/mcp', timeout=5)"
+          >/dev/null 2>&1 || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+networks:
+  knowledge-net:
+    name: obsidian-knowledge-net
+
+volumes:
+  vault-data:
+    name: obsidian-knowledge-vault
+  mcp-state:
+    name: obsidian-knowledge-mcp-state
