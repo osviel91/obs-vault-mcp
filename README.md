@@ -6,11 +6,14 @@ A Portainer-ready Docker Compose stack that:
 2. Keeps the local mirror refreshed on a schedule.
 3. Indexes the mirrored Markdown vault.
 4. Exposes the knowledge base through a read-only MCP endpoint.
+5. Exposes a separate writer MCP that updates the source WebDAV vault safely for curator-style agents.
 
 ## Architecture
 
 ```text
 NAS WebDAV
+    |
+    +--> vault-writer-mcp (direct write path)
     |
     | rclone sync
     v
@@ -23,7 +26,7 @@ Docker named volume: obsidian-knowledge-vault
             +--> MCP: http://HOST:8019/mcp
 ```
 
-The NAS WebDAV vault is the source of truth. The Docker volume is a disposable local mirror. The MCP index and embeddings are stored in a separate persistent volume.
+The NAS WebDAV vault is the source of truth. The Docker volume is a disposable local mirror. The MCP index and embeddings are stored in a separate persistent volume. Curator-style writes go through a separate writer MCP so agents do not edit the disposable mirror.
 
 ## Services
 
@@ -47,6 +50,10 @@ Any local file missing from WebDAV may be removed from the mirror. Do not treat 
 
 Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is configured in application-level read-only mode.
 
+### `vault-writer-mcp`
+
+Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, and archive redundancies without writing into the disposable mirror.
+
 ## Requirements
 
 - Docker Engine with Compose support
@@ -54,6 +61,7 @@ Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is confi
 - A WebDAV endpoint on the NAS
 - Network access from the Docker host to the NAS
 - Network access from Hermes to TCP port `8019` on this host
+- Network access from Hermes curator agents to TCP port `8020` on this host when write access is needed
 
 ## Repository setup
 
@@ -141,6 +149,8 @@ Portainer clones the repository when deploying a Git-backed stack. GitOps update
 | `WEBDAV_PASSWORD_OBSCURED` | output of `rclone obscure` |
 | `WEBDAV_NO_CHECK_CERTIFICATE` | `false` |
 | `SYNC_INTERVAL_SECONDS` | `300` |
+| `CURATOR_ARCHIVE_ROOT` | `.curator-archive` |
+| `CURATOR_ALLOW_HARD_DELETE` | `false` |
 | `PUID` | `1000` |
 | `PGID` | `1000` |
 
@@ -191,6 +201,12 @@ The external endpoint is:
 http://DOCKER_HOST_IP:8019/mcp
 ```
 
+The writer endpoint is:
+
+```text
+http://DOCKER_HOST_IP:8020/mcp
+```
+
 Use the Docker host's LAN IP from another container or machine. Do not use `localhost` from Hermes when Hermes runs on another host.
 
 ## Connect Hermes
@@ -204,6 +220,41 @@ URL: http://DOCKER_HOST_IP:8019/mcp
 ```
 
 No authentication is configured in this baseline stack. Keep the endpoint restricted to a trusted LAN or VPN.
+
+## Curator Writer MCP
+
+Use the two MCP endpoints for different jobs:
+
+- `http://DOCKER_HOST_IP:8019/mcp`: read/search/index endpoint backed by the local mirror
+- `http://DOCKER_HOST_IP:8020/mcp`: write endpoint backed by direct WebDAV access
+
+The writer MCP currently exposes note-focused tools for safe curation work:
+
+- `read_note`
+- `write_note`
+- `upsert_frontmatter`
+- `append_links`
+- `move_note`
+- `archive_note`
+- `delete_note`
+- `list_folder`
+- `stat_path`
+
+Safety model:
+
+- writer tools operate on `.md` notes only
+- note paths are always relative to the vault root
+- `read_note` returns a `sha256` token; pass it back as `expected_sha256` on edits to avoid overwriting concurrent changes
+- `delete_note` archives by default instead of hard-deleting
+- hard delete stays disabled unless `CURATOR_ALLOW_HARD_DELETE=true`
+
+Recommended curator workflow:
+
+1. Discover candidate notes with the read-only MCP on `8019`
+2. Read target notes with the writer MCP to obtain fresh `sha256` values
+3. Apply localized changes such as frontmatter updates, link insertion, moves, or archival
+4. Wait for the next sync cycle or restart `obsidian-vault-sync` to refresh the mirror quickly
+5. Re-query the read-only MCP to validate the new knowledge graph state
 
 ## Updating the vault
 
@@ -246,14 +297,17 @@ Deleting the MCP state volume is safe but forces a complete reindex. Deleting th
 - Keep the Git repository private.
 - Never commit WebDAV credentials.
 - Do not publish port `8019` directly to the Internet.
+- Do not publish port `8020` directly to the Internet.
 - Prefer Tailscale, WireGuard, or a protected reverse proxy for remote access.
-- Keep MCP in read-only mode until you deliberately design a reviewed write workflow.
+- Keep the reader MCP on `8019` in read-only mode. Treat the writer MCP on `8020` as a privileged curator path.
 - Give the NAS WebDAV account access only to the vault directory.
 - Back up the NAS vault independently; synchronization is not a backup.
 
 ## Important behavior
 
 `rclone sync` makes the destination match the source. Files deleted remotely are deleted from the local mirror. Internal MCP state stored under `.markdown_vault_mcp` is excluded from synchronization, and the main index is kept in the separate `mcp-state` volume.
+
+The writer MCP updates WebDAV directly, so curator changes become the new source of truth first and then flow back into the local mirror on the next sync.
 
 This stack builds the rclone remote entirely from environment variables. The remote name in `compose.yaml` is `naswebdav`, so related `RCLONE_CONFIG_...` variables must use that exact name.
 
