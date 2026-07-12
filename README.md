@@ -69,6 +69,8 @@ Any local file missing from WebDAV may be removed from the mirror. Do not treat 
 
 `vault-sync` also watches a small shared control volume for writer-triggered sync requests. After a successful writer mutation, the writer records a sync request so the mirror usually refreshes within a few seconds instead of waiting for the full polling interval.
 
+When a writer request is detected, the loop waits 5 s and then runs `rclone sync` twice, with a 5 s gap between passes. This is intentional: some NAS WebDAV servers take a few seconds to propagate new directory listings after a recent write or move, and a single pass can race the propagation and report "completed" without transferring the new files. The double pass is the fix for that read-after-write race. Scheduled syncs (every `SYNC_INTERVAL_SECONDS`) run a single pass.
+
 ### `markdown-vault-mcp`
 
 Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is configured in application-level read-only mode.
