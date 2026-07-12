@@ -21,6 +21,8 @@
 - `markdown-vault-mcp` is deliberately read-only via `MARKDOWN_VAULT_MCP_READ_ONLY=true`.
 - Curator-style writes must go through `vault-writer-mcp`, which talks directly to WebDAV through `rclone`, not through the local mirror volume.
 - Writer mutations also drop a sync request into the shared `sync-control` volume so `vault-sync` can refresh the mirror quickly; the reader is still eventually consistent with the writer.
+- The writer also exposes a public `request_sync` tool that drops a sync request without performing a writer mutation. Use it when a human edits the vault through NAS WebDAV directly and a curator wants the mirror refreshed on demand.
+- Forcing a reindex of the read-only reader (`markdown-vault-mcp`) is the responsibility of the reader, not the writer. Agents should call the reader's own `reindex` / `build_embeddings` / `get_index_status` tools; the writer does not bridge to the reader.
 - The rclone remote is env-defined and name-sensitive: `compose.yaml` uses remote name `naswebdav`, so the env vars must stay `RCLONE_CONFIG_NASWEBDAV_*`.
 - Exclusions matter in two places:
   - `rclone sync` excludes `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
@@ -48,6 +50,8 @@
 - Follow MCP logs: `docker logs -f markdown-vault-mcp`
 - Follow writer logs: `docker logs -f vault-writer-mcp`
 - Trigger an immediate sync loop iteration: `docker restart obsidian-vault-sync`
+- Force an on-demand mirror refresh from the writer MCP: call `request_sync` on `http://HOST:8020/mcp`
+- Force an immediate reindex from the reader MCP: call `reindex` (or `build_embeddings` for vectors only) on `http://HOST:8019/mcp`; check progress with `get_index_status`
 
 ## Editing Guidance
 - If you add or rename environment variables in `compose.yaml`, update `.env.example` and the variable table in `README.md` in the same change.

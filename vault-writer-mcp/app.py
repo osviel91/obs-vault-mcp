@@ -244,6 +244,18 @@ async def info(_: Request) -> JSONResponse:
 
 
 @mcp.tool
+def request_sync() -> dict[str, Any]:
+    """Drop a sync request into the shared sync-control volume so vault-sync
+    refreshes the local mirror on its next loop iteration. Use this when a
+    human edits the vault directly through NAS WebDAV and the curator wants
+    the mirror refreshed without performing a writer mutation first."""
+    requested_at = _request_sync()
+    if not requested_at:
+        raise WriterError("sync request disabled (SYNC_REQUEST_FILE not configured)")
+    return {"sync_requested_at": requested_at}
+
+
+@mcp.tool
 def stat_path(path: str) -> dict[str, Any]:
     """Return metadata for a note or folder path relative to the vault root."""
     normalized = _normalize_folder_path(path)

@@ -299,6 +299,7 @@ The writer MCP currently exposes note-focused tools for safe curation work:
 - `delete_note`
 - `list_folder`
 - `stat_path`
+- `request_sync`
 
 Safety model:
 
@@ -308,13 +309,14 @@ Safety model:
 - `delete_note` archives by default instead of hard-deleting
 - hard delete stays disabled unless `CURATOR_ALLOW_HARD_DELETE=true`
 - successful write, move, archive, and delete operations also request an immediate mirror sync
+- `request_sync` is the only MCP way to force the mirror to refresh without performing a writer mutation (useful after a human edits the vault directly through NAS WebDAV)
 
 Recommended curator workflow:
 
 1. Discover candidate notes with the read-only MCP on `8019`
 2. Read target notes with the writer MCP to obtain fresh `sha256` values
 3. Apply localized changes such as frontmatter updates, link insertion, moves, or archival
-4. Wait a few seconds for the writer-triggered sync request to refresh the mirror, or restart `obsidian-vault-sync` if you need a manual kick
+4. Wait a few seconds for the writer-triggered sync request to refresh the mirror, or call `request_sync` (writer MCP) followed by `reindex` or `build_embeddings` (read-only MCP) if you need a faster end-to-end refresh
 5. Re-query the read-only MCP to validate the new knowledge graph state
 
 ## Updating the vault
@@ -329,7 +331,16 @@ The file watcher in `markdown-vault-mcp` detects changes inside the local mirror
 
 In normal operation, curator writes through `vault-writer-mcp` request an immediate mirror refresh automatically. The remaining lag is usually the time for `vault-sync` to run the triggered sync and for `markdown-vault-mcp` to notice the new files inside the mirror.
 
-To trigger a synchronization immediately:
+### On-demand refresh from MCP
+
+Agents and humans can force a refresh without restarting containers by combining the two MCPs:
+
+1. Call `request_sync` on the writer MCP (`8020/mcp`) to drop a sync request into the shared `sync-control` volume. `vault-sync` picks it up on its next loop iteration (within a second) and runs `rclone sync`.
+2. Call `reindex` on the read-only MCP (`8019/mcp`) to force a full vault reindex immediately, instead of waiting for the file watcher debounce. Use `build_embeddings` if you only need to refresh the vector index, and `get_index_status` to verify the state.
+
+This is the recommended path after a human edits the vault directly through NAS WebDAV and a curator agent wants to see the changes without performing any writer mutation.
+
+To trigger a synchronization immediately from the Docker host:
 
 ```bash
 docker restart obsidian-vault-sync
