@@ -138,6 +138,18 @@ compose.yaml
 
 Portainer clones the repository when deploying a Git-backed stack. GitOps updates can later pull and redeploy changes from the repository.
 
+### Optional GitHub Actions redeploy
+
+This repo includes `.github/workflows/redeploy-portainer.yml`, which can trigger a Portainer stack redeploy automatically on every push to `master`.
+
+To enable it, add this GitHub Actions secret in the repository settings:
+
+```text
+PORTAINER_WEBHOOK_URL
+```
+
+Set it to the full Portainer stack webhook URL. Keep it in GitHub Secrets, not in the committed workflow file.
+
 ## Required Portainer variables
 
 | Variable | Example |

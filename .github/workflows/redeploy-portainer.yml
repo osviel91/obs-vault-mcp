@@ -1,0 +1,17 @@
+name: Redeploy Portainer Stack
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Portainer webhook
+        env:
+          PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+        run: |
+          test -n "$PORTAINER_WEBHOOK_URL"
+          curl --fail --silent --show-error -X POST "$PORTAINER_WEBHOOK_URL"
