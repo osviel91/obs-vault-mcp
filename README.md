@@ -73,6 +73,8 @@ Any local file missing from WebDAV may be removed from the mirror. Do not treat 
 
 Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is configured in application-level read-only mode.
 
+The filesystem watcher is intentionally disabled (`MARKDOWN_VAULT_MCP_FILE_WATCHER=false`). The local mirror is populated by `vault-sync` from another container, and inotify does not see cross-container writes. Index convergence is handled by the boot-time reconciliation pass plus explicit `reindex` / `build_embeddings` calls from MCP.
+
 ### `vault-writer-mcp`
 
 Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, and archive redundancies without writing into the disposable mirror.
@@ -336,7 +338,7 @@ In normal operation, curator writes through `vault-writer-mcp` request an immedi
 Agents and humans can force a refresh without restarting containers by combining the two MCPs:
 
 1. Call `request_sync` on the writer MCP (`8020/mcp`) to drop a sync request into the shared `sync-control` volume. `vault-sync` picks it up on its next loop iteration (within a second) and runs `rclone sync`.
-2. Call `reindex` on the read-only MCP (`8019/mcp`) to force a full vault reindex immediately, instead of waiting for the file watcher debounce. Use `build_embeddings` if you only need to refresh the vector index, and `get_index_status` to verify the state.
+2. Call `reindex` on the read-only MCP (`8019/mcp`) to force a full vault reindex immediately. The reader's filesystem watcher is disabled by design (the mirror is populated by another container), so `reindex` is the only way to pick up external changes once the mirror is fresh. Use `build_embeddings` if you only need to refresh the vector index, and `get_index_status` to verify the state.
 
 This is the recommended path after a human edits the vault directly through NAS WebDAV and a curator agent wants to see the changes without performing any writer mutation.
 

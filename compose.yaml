@@ -138,6 +138,7 @@ services:
     environment:
       MARKDOWN_VAULT_MCP_SOURCE_DIR: /data/vault
       MARKDOWN_VAULT_MCP_READ_ONLY: "true"
+      MARKDOWN_VAULT_MCP_FILE_WATCHER: "false"
       MARKDOWN_VAULT_MCP_INDEX_PATH: /data/state/index.db
       MARKDOWN_VAULT_MCP_EMBEDDINGS_PATH: /data/state/embeddings
       MARKDOWN_VAULT_MCP_KV_STORE_URL: file:///data/state/kv

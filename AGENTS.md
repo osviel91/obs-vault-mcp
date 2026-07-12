@@ -23,6 +23,7 @@
 - Writer mutations also drop a sync request into the shared `sync-control` volume so `vault-sync` can refresh the mirror quickly; the reader is still eventually consistent with the writer.
 - The writer also exposes a public `request_sync` tool that drops a sync request without performing a writer mutation. Use it when a human edits the vault through NAS WebDAV directly and a curator wants the mirror refreshed on demand.
 - Forcing a reindex of the read-only reader (`markdown-vault-mcp`) is the responsibility of the reader, not the writer. Agents should call the reader's own `reindex` / `build_embeddings` / `get_index_status` tools; the writer does not bridge to the reader.
+- `MARKDOWN_VAULT_MCP_FILE_WATCHER=false` is set on purpose: the local mirror is populated by `vault-sync` from another container, and inotify does not see cross-container writes. Do not re-enable the watcher without first proving external edits land in the same container as the reader.
 - The rclone remote is env-defined and name-sensitive: `compose.yaml` uses remote name `naswebdav`, so the env vars must stay `RCLONE_CONFIG_NASWEBDAV_*`.
 - Exclusions matter in two places:
   - `rclone sync` excludes `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
