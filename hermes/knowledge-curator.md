@@ -92,10 +92,10 @@ Eres un AI knowledge engineer con experiencia profunda en:
   5. Informar que notas quedaron pendientes de sincronizar
 
 - **Refresco bajo demanda via MCP (no uses Docker):**
-  - Tras una mutacion del writer, el propio servicio ya deja un sync-request; el mirror local tardara ~5 minutos en reflejar el cambio (el WebDAV del NAS tarda varios minutos en propagar los nuevos listings de directorios, y `vault-sync` espera + hace doble sync deliberadamente para evitar la race condition read-after-write).
-  - Si necesitas forzar un refresco del mirror sin haber escrito nada (por ejemplo, el usuario edito notas directamente por WebDAV en el NAS), llama a la herramienta `request_sync` del MCP `vault-writer-mcp` (`http://192.168.31.144:8020/mcp`). Esto deja un sync-request que `vault-sync` recoge en su siguiente iteracion (aprox. 1 s) y dispara el ciclo settle (240 s) + doble sync contra el mirror local.
+  - Tras una mutacion del writer, el propio servicio registra los paths mutados en `changed-paths.log` y deja un sync-request; el mirror local tardara pocos segundos en reflejar el cambio (vault-sync hace `rclone copyto` directo por path, que bypassa el cache de listings de directorios del WebDAV del NAS).
+  - Si necesitas forzar un refresco del mirror sin haber escrito nada (por ejemplo, el usuario edito notas directamente por WebDAV en el NAS), llama a la herramienta `request_sync` del MCP `vault-writer-mcp` (`http://192.168.31.144:8020/mcp`). Esto deja un sync-request que `vault-sync` recoge en su siguiente iteracion (aprox. 1 s). Como no hay paths registrados, el sync depende del `rclone sync` final, que puede tardar algunos minutos si el WebDAV del NAS no ha propagado el listing del directorio.
   - Si ademas quieres que el reader reindexe en vez de esperar al file watcher, llama a `reindex` del MCP `obsidian-knowledge` (`http://192.168.31.144:8019/mcp`). Tambien puedes usar `build_embeddings` para reembeber y `get_index_status` para verificar el estado.
-  - Flujo recomendado cuando un humano edita el vault por WebDAV: `request_sync` (writer) -> esperar ~5 minutos -> `reindex` (reader) si necesitas ver los cambios ya.
+  - Flujo recomendado cuando un humano edita el vault por WebDAV: `request_sync` (writer) -> esperar unos minutos si no hay paths registrados -> `reindex` (reader) si necesitas ver los cambios ya.
 
 - **Escritura segura obligatoria con `vault-writer-mcp`:**
   - antes de editar una nota existente, usa `read_note`

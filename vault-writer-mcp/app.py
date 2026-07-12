@@ -27,6 +27,7 @@ NO_CHECK_CERT = os.getenv("WEBDAV_NO_CHECK_CERTIFICATE", "false").lower() == "tr
 ARCHIVE_ROOT = os.getenv("CURATOR_ARCHIVE_ROOT", ".curator-archive").strip("/") or ".curator-archive"
 ALLOW_HARD_DELETE = os.getenv("CURATOR_ALLOW_HARD_DELETE", "false").lower() == "true"
 SYNC_REQUEST_FILE = os.getenv("SYNC_REQUEST_FILE", "/control/request-sync")
+CHANGED_PATHS_FILE = os.getenv("CHANGED_PATHS_FILE", "/control/changed-paths.log")
 
 mcp = FastMCP(
     "vault-writer-mcp",
@@ -200,6 +201,7 @@ def _write_text(path: str, content: str) -> dict[str, Any]:
         "size_bytes": state.size_bytes,
         "modified_at": state.modified_at,
     }
+    _record_changed_path("write", path)
     requested_at = _request_sync()
     if requested_at:
         result["sync_requested_at"] = requested_at
@@ -222,6 +224,17 @@ def _request_sync() -> str | None:
         handle.write(stamp)
     logger.info("Requested mirror sync via %s", SYNC_REQUEST_FILE)
     return stamp
+
+
+def _record_changed_path(operation: str, path: str) -> None:
+    if not CHANGED_PATHS_FILE:
+        return
+    directory = os.path.dirname(CHANGED_PATHS_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(CHANGED_PATHS_FILE, "a", encoding="utf-8") as handle:
+        handle.write(f"{operation}|{path}\n")
+    logger.info("Recorded changed path: %s %s", operation, path)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -393,6 +406,8 @@ def move_note(from_path: str, to_path: str, expected_sha256: str | None = None) 
         "size_bytes": state.size_bytes,
         "modified_at": state.modified_at,
     }
+    _record_changed_path("write", target)
+    _record_changed_path("delete", source)
     requested_at = _request_sync()
     if requested_at:
         result["sync_requested_at"] = requested_at
@@ -415,6 +430,8 @@ def archive_note(path: str, expected_sha256: str | None = None) -> dict[str, Any
         "size_bytes": state.size_bytes,
         "modified_at": state.modified_at,
     }
+    _record_changed_path("write", archive_path)
+    _record_changed_path("delete", normalized)
     requested_at = _request_sync()
     if requested_at:
         result["sync_requested_at"] = requested_at
@@ -434,6 +451,7 @@ def delete_note(path: str, expected_sha256: str | None = None, hard_delete: bool
         raise WriterError("hard_delete is disabled by CURATOR_ALLOW_HARD_DELETE=false")
     _rclone(["deletefile", _join_remote(normalized)])
     result = {"path": normalized, "mode": "hard_deleted"}
+    _record_changed_path("delete", normalized)
     requested_at = _request_sync()
     if requested_at:
         result["sync_requested_at"] = requested_at

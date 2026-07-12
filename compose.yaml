@@ -93,11 +93,30 @@ services:
           NOW=$$(date +%s)
           if [ -n "$$CURRENT_REQUEST" ] && [ "$$CURRENT_REQUEST" != "$$LAST_REQUEST" ]; then
             echo "Detected writer sync request: $$CURRENT_REQUEST"
-            echo "Waiting 240s for the WebDAV source to settle before syncing..."
-            sleep 240
-            sync_once
-            echo "Running a follow-up sync to catch late-arriving listings..."
-            sleep 60
+            if [ -f /control/changed-paths.log ]; then
+              mv /control/changed-paths.log /control/changed-paths.processing 2>/dev/null || true
+              if [ -f /control/changed-paths.processing ]; then
+                echo "Applying per-path copyto to bypass the WebDAV directory listing cache..."
+                while IFS='|' read -r OP CHANGED_PATH; do
+                  [ -z "$$CHANGED_PATH" ] && continue
+                  case "$$REMOTE" in
+                    *:) FULL_REMOTE="$$REMOTE$$CHANGED_PATH" ;;
+                    *)  FULL_REMOTE="$$REMOTE/$$CHANGED_PATH" ;;
+                  esac
+                  case "$$OP" in
+                    write)
+                      echo "  copyto: $$CHANGED_PATH"
+                      rclone --no-check-certificate copyto "$$FULL_REMOTE" "/vault/$$CHANGED_PATH" 2>&1 || echo "  copyto failed: $$CHANGED_PATH"
+                      ;;
+                    delete)
+                      echo "  deletefile: $$CHANGED_PATH"
+                      rclone deletefile "/vault/$$CHANGED_PATH" 2>&1 || echo "  deletefile failed: $$CHANGED_PATH"
+                      ;;
+                  esac
+                done < /control/changed-paths.processing
+                rm -f /control/changed-paths.processing
+              fi
+            fi
             sync_once
             LAST_REQUEST="$$CURRENT_REQUEST"
             NEXT_SYNC_EPOCH=$$(($$NOW + $${SYNC_INTERVAL_SECONDS}))
@@ -189,6 +208,7 @@ services:
       CURATOR_ARCHIVE_ROOT: ${CURATOR_ARCHIVE_ROOT}
       CURATOR_ALLOW_HARD_DELETE: ${CURATOR_ALLOW_HARD_DELETE}
       SYNC_REQUEST_FILE: /control/request-sync
+      CHANGED_PATHS_FILE: /control/changed-paths.log
       PORT: 8000
     ports:
       - "8020:8000"

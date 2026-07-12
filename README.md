@@ -67,9 +67,9 @@ NAS WebDAV -> Docker mirror
 
 Any local file missing from WebDAV may be removed from the mirror. Do not treat the mirror as an editing location.
 
-`vault-sync` also watches a small shared control volume for writer-triggered sync requests. After a successful writer mutation, the writer records a sync request so the mirror usually refreshes within a few seconds instead of waiting for the full polling interval.
+`vault-sync` also watches a small shared control volume for writer-triggered sync requests. After a successful writer mutation, the writer records a sync request and a per-path `changed-paths.log` entry so the mirror refreshes within a few seconds instead of waiting for the full polling interval.
 
-When a writer request is detected, the loop waits 240 s (4 minutes) for the NAS WebDAV to propagate new directory listings, then runs `rclone sync` twice with a 60 s gap between passes. This is intentional: the NAS WebDAV used by this stack takes several minutes to propagate new directory listings after a recent write or move, and a single pass can race the propagation and report "completed" without transferring the new files. The wait + double pass is the fix for that read-after-write race, and the typical writer-to-mirror latency is therefore around 5 minutes. Scheduled syncs (every `SYNC_INTERVAL_SECONDS`) run a single pass.
+When a writer request is detected, `vault-sync` first processes `changed-paths.log` (if any) by issuing one `rclone copyto` (or `deletefile`) per recorded path. This bypasses the WebDAV directory listing cache: the WebDAV may take several minutes to refresh a directory's `PROPFIND` listing after a write, but a direct GET on a specific file path returns the bytes immediately, so the mutated file lands in the mirror in under a second per path. Then a single `rclone sync` runs as best-effort cleanup for deletes and any other changes the writer did not announce. Scheduled syncs (every `SYNC_INTERVAL_SECONDS`) run a single pass as before.
 
 ### `markdown-vault-mcp`
 
@@ -339,8 +339,10 @@ In normal operation, curator writes through `vault-writer-mcp` request an immedi
 
 Agents and humans can force a refresh without restarting containers by combining the two MCPs:
 
-1. Call `request_sync` on the writer MCP (`8020/mcp`) to drop a sync request into the shared `sync-control` volume. `vault-sync` picks it up on its next loop iteration (within a second) and runs `rclone sync`.
+1. Call `request_sync` on the writer MCP (`8020/mcp`) to drop a sync request into the shared `sync-control` volume. `vault-sync` picks it up on its next loop iteration (within a second) and runs the per-path `copyto` cleanup.
 2. Call `reindex` on the read-only MCP (`8019/mcp`) to force a full vault reindex immediately. The reader's filesystem watcher is disabled by design (the mirror is populated by another container), so `reindex` is the only way to pick up external changes once the mirror is fresh. Use `build_embeddings` if you only need to refresh the vector index, and `get_index_status` to verify the state.
+
+If `request_sync` is called without a preceding writer mutation (e.g. a human edited the vault directly through NAS WebDAV), there is no per-path entry in `changed-paths.log`; the mirror then depends on the single cleanup `rclone sync`, which is subject to the WebDAV directory listing propagation delay (typically a few minutes). In that case, a `docker restart obsidian-vault-sync` is still the heavy hammer.
 
 This is the recommended path after a human edits the vault directly through NAS WebDAV and a curator agent wants to see the changes without performing any writer mutation.
 
