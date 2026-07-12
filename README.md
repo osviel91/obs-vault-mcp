@@ -47,7 +47,7 @@ That split is intentional:
 - humans edit the source vault directly through WebDAV
 - Hermes reads from the indexed mirror for fast semantic/context queries
 - Hermes writes through a dedicated writer service so changes land in the source vault first
-- the mirror catches up on the next sync cycle
+- the mirror catches up on the next sync cycle, and writer mutations now request an immediate sync trigger to reduce lag
 
 ## Services
 
@@ -66,6 +66,8 @@ NAS WebDAV -> Docker mirror
 ```
 
 Any local file missing from WebDAV may be removed from the mirror. Do not treat the mirror as an editing location.
+
+`vault-sync` also watches a small shared control volume for writer-triggered sync requests. After a successful writer mutation, the writer records a sync request so the mirror usually refreshes within a few seconds instead of waiting for the full polling interval.
 
 ### `markdown-vault-mcp`
 
@@ -305,13 +307,14 @@ Safety model:
 - `read_note` returns a `sha256` token; pass it back as `expected_sha256` on edits to avoid overwriting concurrent changes
 - `delete_note` archives by default instead of hard-deleting
 - hard delete stays disabled unless `CURATOR_ALLOW_HARD_DELETE=true`
+- successful write, move, archive, and delete operations also request an immediate mirror sync
 
 Recommended curator workflow:
 
 1. Discover candidate notes with the read-only MCP on `8019`
 2. Read target notes with the writer MCP to obtain fresh `sha256` values
 3. Apply localized changes such as frontmatter updates, link insertion, moves, or archival
-4. Wait for the next sync cycle or restart `obsidian-vault-sync` to refresh the mirror quickly
+4. Wait a few seconds for the writer-triggered sync request to refresh the mirror, or restart `obsidian-vault-sync` if you need a manual kick
 5. Re-query the read-only MCP to validate the new knowledge graph state
 
 ## Updating the vault
@@ -323,6 +326,8 @@ SYNC_INTERVAL_SECONDS
 ```
 
 The file watcher in `markdown-vault-mcp` detects changes inside the local mirror and updates its indexes.
+
+In normal operation, curator writes through `vault-writer-mcp` request an immediate mirror refresh automatically. The remaining lag is usually the time for `vault-sync` to run the triggered sync and for `markdown-vault-mcp` to notice the new files inside the mirror.
 
 To trigger a synchronization immediately:
 
@@ -366,6 +371,8 @@ Deleting the MCP state volume is safe but forces a complete reindex. Deleting th
 `rclone sync` makes the destination match the source. Files deleted remotely are deleted from the local mirror. Internal MCP state stored under `.markdown_vault_mcp` is excluded from synchronization, and the main index is kept in the separate `mcp-state` volume.
 
 The writer MCP updates WebDAV directly, so curator changes become the new source of truth first and then flow back into the local mirror on the next sync.
+
+That means the system is still eventually consistent, but the shared sync trigger reduces the gap between writer-visible changes and reader-visible changes.
 
 This stack builds the rclone remote entirely from environment variables. The remote name in `compose.yaml` is `naswebdav`, so related `RCLONE_CONFIG_...` variables must use that exact name.
 

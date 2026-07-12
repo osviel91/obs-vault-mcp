@@ -20,6 +20,7 @@
 - `vault-sync` logs failures and keeps the previous mirror instead of deleting local data after a failed sync. Keep that failure behavior intact unless explicitly changing recovery semantics.
 - `markdown-vault-mcp` is deliberately read-only via `MARKDOWN_VAULT_MCP_READ_ONLY=true`.
 - Curator-style writes must go through `vault-writer-mcp`, which talks directly to WebDAV through `rclone`, not through the local mirror volume.
+- Writer mutations also drop a sync request into the shared `sync-control` volume so `vault-sync` can refresh the mirror quickly; the reader is still eventually consistent with the writer.
 - The rclone remote is env-defined and name-sensitive: `compose.yaml` uses remote name `naswebdav`, so the env vars must stay `RCLONE_CONFIG_NASWEBDAV_*`.
 - Exclusions matter in two places:
   - `rclone sync` excludes `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
@@ -36,6 +37,7 @@
 - Persistent volumes:
   - `obsidian-knowledge-vault`: disposable local mirror of WebDAV
   - `obsidian-knowledge-mcp-state`: persistent index, embeddings, and cache
+  - `obsidian-knowledge-sync-control`: shared control volume used to trigger faster mirror refreshes after writer mutations
 
 ## Useful Commands
 - Validate Compose after edits: `docker compose --env-file .env.example config`

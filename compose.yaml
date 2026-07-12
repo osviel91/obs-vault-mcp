@@ -56,6 +56,7 @@ services:
       - |
         set -eu
         REMOTE="naswebdav:"
+        REQUEST_FILE="/control/request-sync"
         if [ -n "${WEBDAV_REMOTE_PATH}" ]; then
           REMOTE="naswebdav:${WEBDAV_REMOTE_PATH}"
         fi
@@ -73,7 +74,7 @@ services:
         if [ "${WEBDAV_NO_CHECK_CERTIFICATE}" = "true" ]; then
           set -- "$$@" --no-check-certificate
         fi
-        while true; do
+        sync_once() {
           echo "Synchronizing vault from WebDAV..."
           if "$$@"; then
               date -Iseconds > /vault/.webdav-sync-ready
@@ -81,7 +82,28 @@ services:
           else
               echo "Synchronization failed; preserving the previous local mirror."
           fi
-          sleep "${SYNC_INTERVAL_SECONDS}"
+        }
+        LAST_REQUEST=""
+        NEXT_SYNC_EPOCH=$$(($$(date +%s) + $${SYNC_INTERVAL_SECONDS}))
+        while true; do
+          CURRENT_REQUEST=""
+          if [ -f "$$REQUEST_FILE" ]; then
+            CURRENT_REQUEST=$$(cat "$$REQUEST_FILE" 2>/dev/null || true)
+          fi
+          NOW=$$(date +%s)
+          if [ -n "$$CURRENT_REQUEST" ] && [ "$$CURRENT_REQUEST" != "$$LAST_REQUEST" ]; then
+            echo "Detected writer sync request: $$CURRENT_REQUEST"
+            sync_once
+            LAST_REQUEST="$$CURRENT_REQUEST"
+            NEXT_SYNC_EPOCH=$$(($$NOW + $${SYNC_INTERVAL_SECONDS}))
+            continue
+          fi
+          if [ "$$NOW" -ge "$$NEXT_SYNC_EPOCH" ]; then
+            sync_once
+            NEXT_SYNC_EPOCH=$$(($$(date +%s) + $${SYNC_INTERVAL_SECONDS}))
+            continue
+          fi
+          sleep 1
         done
     environment:
       RCLONE_CONFIG_NASWEBDAV_TYPE: webdav
@@ -94,6 +116,7 @@ services:
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
     volumes:
       - vault-data:/vault
+      - sync-control:/control
     networks:
       - knowledge-net
 
@@ -159,9 +182,12 @@ services:
       WEBDAV_NO_CHECK_CERTIFICATE: ${WEBDAV_NO_CHECK_CERTIFICATE}
       CURATOR_ARCHIVE_ROOT: ${CURATOR_ARCHIVE_ROOT}
       CURATOR_ALLOW_HARD_DELETE: ${CURATOR_ALLOW_HARD_DELETE}
+      SYNC_REQUEST_FILE: /control/request-sync
       PORT: 8000
     ports:
       - "8020:8000"
+    volumes:
+      - sync-control:/control
     networks:
       - knowledge-net
     healthcheck:
@@ -185,3 +211,5 @@ volumes:
     name: obsidian-knowledge-vault
   mcp-state:
     name: obsidian-knowledge-mcp-state
+  sync-control:
+    name: obsidian-knowledge-sync-control

@@ -26,6 +26,7 @@ REMOTE_ROOT = os.getenv("WEBDAV_REMOTE_PATH", "").strip("/")
 NO_CHECK_CERT = os.getenv("WEBDAV_NO_CHECK_CERTIFICATE", "false").lower() == "true"
 ARCHIVE_ROOT = os.getenv("CURATOR_ARCHIVE_ROOT", ".curator-archive").strip("/") or ".curator-archive"
 ALLOW_HARD_DELETE = os.getenv("CURATOR_ALLOW_HARD_DELETE", "false").lower() == "true"
+SYNC_REQUEST_FILE = os.getenv("SYNC_REQUEST_FILE", "/control/request-sync")
 
 mcp = FastMCP(
     "vault-writer-mcp",
@@ -193,17 +194,34 @@ def _write_text(path: str, content: str) -> dict[str, Any]:
     _ensure_parent_folder(path)
     _rclone(["rcat", _join_remote(path)], stdin_text=content)
     state = _read_note_state(path)
-    return {
+    result = {
         "path": path,
         "sha256": state.sha256,
         "size_bytes": state.size_bytes,
         "modified_at": state.modified_at,
     }
+    requested_at = _request_sync()
+    if requested_at:
+        result["sync_requested_at"] = requested_at
+    return result
 
 
 def _archive_destination(path: str) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{ARCHIVE_ROOT}/{stamp}/{path}"
+
+
+def _request_sync() -> str | None:
+    if not SYNC_REQUEST_FILE:
+        return None
+    directory = os.path.dirname(SYNC_REQUEST_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    stamp = datetime.now(UTC).isoformat()
+    with open(SYNC_REQUEST_FILE, "w", encoding="utf-8") as handle:
+        handle.write(stamp)
+    logger.info("Requested mirror sync via %s", SYNC_REQUEST_FILE)
+    return stamp
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -356,13 +374,17 @@ def move_note(from_path: str, to_path: str, expected_sha256: str | None = None) 
     _ensure_parent_folder(target)
     _rclone(["moveto", _join_remote(source), _join_remote(target)])
     state = _read_note_state(target)
-    return {
+    result = {
         "from_path": source,
         "to_path": target,
         "sha256": state.sha256,
         "size_bytes": state.size_bytes,
         "modified_at": state.modified_at,
     }
+    requested_at = _request_sync()
+    if requested_at:
+        result["sync_requested_at"] = requested_at
+    return result
 
 
 @mcp.tool
@@ -374,13 +396,17 @@ def archive_note(path: str, expected_sha256: str | None = None) -> dict[str, Any
     _ensure_parent_folder(archive_path)
     _rclone(["moveto", _join_remote(normalized), _join_remote(archive_path)])
     state = _read_note_state(archive_path)
-    return {
+    result = {
         "from_path": normalized,
         "archive_path": archive_path,
         "sha256": state.sha256,
         "size_bytes": state.size_bytes,
         "modified_at": state.modified_at,
     }
+    requested_at = _request_sync()
+    if requested_at:
+        result["sync_requested_at"] = requested_at
+    return result
 
 
 @mcp.tool
@@ -395,7 +421,11 @@ def delete_note(path: str, expected_sha256: str | None = None, hard_delete: bool
     if not ALLOW_HARD_DELETE:
         raise WriterError("hard_delete is disabled by CURATOR_ALLOW_HARD_DELETE=false")
     _rclone(["deletefile", _join_remote(normalized)])
-    return {"path": normalized, "mode": "hard_deleted"}
+    result = {"path": normalized, "mode": "hard_deleted"}
+    requested_at = _request_sync()
+    if requested_at:
+        result["sync_requested_at"] = requested_at
+    return result
 
 
 if __name__ == "__main__":
