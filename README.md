@@ -2,7 +2,7 @@
 
 A Portainer-ready Docker Compose stack that:
 
-1. Mirrors an Obsidian vault from a NAS over WebDAV.
+1. Lets Obsidian desktop/mobile clients edit the vault directly over WebDAV.
 2. Keeps the local mirror refreshed on a schedule.
 3. Indexes the mirrored Markdown vault.
 4. Exposes the knowledge base through a read-only MCP endpoint.
@@ -11,22 +11,43 @@ A Portainer-ready Docker Compose stack that:
 ## Architecture
 
 ```text
-NAS WebDAV
+Obsidian desktop/mobile clients
     |
-    +--> vault-writer-mcp (direct write path)
+    | WebDAV read/write
+    v
+NAS WebDAV (source of truth)
+    |
+    +--> vault-writer-mcp (Hermes write path)
     |
     | rclone sync
     v
 Docker named volume: obsidian-knowledge-vault
     |
-    +--> markdown-vault-mcp
+    +--> markdown-vault-mcp (Hermes read/search path)
             |
             +--> full-text index
             +--> semantic embeddings
             +--> MCP: http://HOST:8019/mcp
 ```
 
-The NAS WebDAV vault is the source of truth. The Docker volume is a disposable local mirror. The MCP index and embeddings are stored in a separate persistent volume. Curator-style writes go through a separate writer MCP so agents do not edit the disposable mirror.
+The NAS WebDAV vault is the source of truth and is shared directly with your Obsidian clients over WebDAV. The Docker volume is only a disposable local mirror for indexing and read/search MCP access. Curator-style writes go through a separate writer MCP so agents do not edit the disposable mirror.
+
+## Final Architecture
+
+This project exists to give Hermes full knowledge access without making Hermes mount or edit the vault filesystem directly.
+
+Final access model:
+
+- Obsidian clients on desktop/mobile: direct WebDAV read/write to the NAS vault
+- Hermes read/search/analysis: `markdown-vault-mcp` on `8019`, backed by the mirrored local volume
+- Hermes curator writes: `vault-writer-mcp` on `8020`, backed by direct WebDAV access to the source vault
+
+That split is intentional:
+
+- humans edit the source vault directly through WebDAV
+- Hermes reads from the indexed mirror for fast semantic/context queries
+- Hermes writes through a dedicated writer service so changes land in the source vault first
+- the mirror catches up on the next sync cycle
 
 ## Services
 
@@ -53,6 +74,12 @@ Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is confi
 ### `vault-writer-mcp`
 
 Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, and archive redundancies without writing into the disposable mirror.
+
+## Hermes Profiles
+
+- `hermes/knowledge-curator.md`: repo-local prompt/instructions for a Hermes curator profile that knows how to use both MCP services safely
+
+Use that file as the source of truth for the Hermes `Knowledge Curator` system prompt instead of maintaining an unrelated copy elsewhere.
 
 ## Requirements
 
@@ -232,6 +259,25 @@ URL: http://DOCKER_HOST_IP:8019/mcp
 ```
 
 No authentication is configured in this baseline stack. Keep the endpoint restricted to a trusted LAN or VPN.
+
+For a curator-capable Hermes setup, register both remote MCP servers:
+
+```text
+Name: obsidian-knowledge
+Transport: Streamable HTTP
+URL: http://DOCKER_HOST_IP:8019/mcp
+```
+
+```text
+Name: vault-writer-mcp
+Transport: Streamable HTTP
+URL: http://DOCKER_HOST_IP:8020/mcp
+```
+
+Recommended role split inside Hermes:
+
+- `obsidian-knowledge`: search, read, backlinks, semantic discovery, context gathering
+- `vault-writer-mcp`: write, move, archive, frontmatter updates, link insertion
 
 ## Curator Writer MCP
 

@@ -9,6 +9,7 @@
 - `.env.example`: source of truth for required stack variables and expected defaults.
 - `README.md`: operational workflow for Portainer deploys and runtime verification.
 - `vault-writer-mcp/app.py`: source of truth for curator write safety rules and available write tools.
+- `hermes/knowledge-curator.md`: source of truth for the Hermes curator profile prompt and the intended two-MCP operating model.
 
 ## Deployment Model
 - This stack is intended for Portainer Git stack deploys, not a local app dev loop.
@@ -30,6 +31,7 @@
 ## Runtime Facts
 - Host endpoint: `http://HOST:8019/mcp`
 - Writer endpoint: `http://HOST:8020/mcp`
+- Humans edit the vault directly through NAS WebDAV; Hermes should use the MCP endpoints, not WebDAV directly.
 - Container listens on `8000`; Compose publishes `8019:8000`.
 - Persistent volumes:
   - `obsidian-knowledge-vault`: disposable local mirror of WebDAV
