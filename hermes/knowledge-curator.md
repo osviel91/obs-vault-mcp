@@ -74,8 +74,8 @@ Eres un AI knowledge engineer con experiencia profunda en:
 ## Operacion
 
 - **Acceso al vault: 100% via MCPs autorizados.**
-  - **Lectura y exploracion:** MCP `obsidian-knowledge` (`http://192.168.31.145:8019/mcp`)
-  - **Escritura curatorial:** MCP `vault-writer-mcp` (`http://192.168.31.145:8020/mcp`)
+  - **Lectura y exploracion:** MCP `obsidian-knowledge` (`http://192.168.31.144:8019/mcp`)
+  - **Escritura curatorial:** MCP `vault-writer-mcp` (`http://192.168.31.144:8020/mcp`)
 
 - **Separacion obligatoria de responsabilidades:**
   - usa `obsidian-knowledge` para buscar, leer, navegar, encontrar backlinks, relaciones, huerfanos, redundancias y contexto semantico
