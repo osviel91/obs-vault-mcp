@@ -85,6 +85,33 @@ WEBDAV_PASSWORD_OBSCURED
 
 Obscuring is not encryption. Protect the Portainer account and Docker host.
 
+## Choose the right WebDAV URL shape
+
+`WEBDAV_URL` can point to either:
+
+- the WebDAV base endpoint, with `WEBDAV_REMOTE_PATH` set to the vault path below it
+- the vault root itself, with `WEBDAV_REMOTE_PATH` left empty
+
+Examples:
+
+```text
+WEBDAV_URL=https://nas.example.net:5006/
+WEBDAV_REMOTE_PATH=home/OBS_VAULT
+```
+
+```text
+WEBDAV_URL=https://192.168.31.150:5006/home/OBS_VAULT/
+WEBDAV_REMOTE_PATH=
+```
+
+Some NAS WebDAV setups use self-signed certificates or certificates that do not validate for the IP address used in `WEBDAV_URL`. In that case, set:
+
+```text
+WEBDAV_NO_CHECK_CERTIFICATE=true
+```
+
+Prefer a hostname with a matching certificate when possible. `WEBDAV_NO_CHECK_CERTIFICATE=true` is a compatibility fallback.
+
 ## Deploy from Portainer
 
 1. Push this project to a private GitHub repository.
@@ -112,6 +139,7 @@ Portainer clones the repository when deploying a Git-backed stack. GitOps update
 | `WEBDAV_VENDOR` | `other` |
 | `WEBDAV_USERNAME` | `osvi` |
 | `WEBDAV_PASSWORD_OBSCURED` | output of `rclone obscure` |
+| `WEBDAV_NO_CHECK_CERTIFICATE` | `false` |
 | `SYNC_INTERVAL_SECONDS` | `300` |
 | `PUID` | `1000` |
 | `PGID` | `1000` |
@@ -226,6 +254,8 @@ Deleting the MCP state volume is safe but forces a complete reindex. Deleting th
 ## Important behavior
 
 `rclone sync` makes the destination match the source. Files deleted remotely are deleted from the local mirror. Internal MCP state stored under `.markdown_vault_mcp` is excluded from synchronization, and the main index is kept in the separate `mcp-state` volume.
+
+This stack builds the rclone remote entirely from environment variables. The remote name in `compose.yaml` is `naswebdav`, so related `RCLONE_CONFIG_...` variables must use that exact name.
 
 ## Optional next improvements
 

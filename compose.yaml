@@ -9,8 +9,11 @@ services:
     command:
       - |
         set -eu
-        echo "Performing initial WebDAV synchronization..."
-        rclone sync nas-webdav:"${WEBDAV_REMOTE_PATH}" /vault \
+        REMOTE="naswebdav:"
+        if [ -n "${WEBDAV_REMOTE_PATH}" ]; then
+          REMOTE="naswebdav:${WEBDAV_REMOTE_PATH}"
+        fi
+        set -- rclone sync "$$REMOTE" /vault \
           --create-empty-src-dirs \
           --delete-during \
           --exclude "/.markdown_vault_mcp/**" \
@@ -21,15 +24,21 @@ services:
           --retries 5 \
           --low-level-retries 10 \
           --log-level INFO
+        if [ "${WEBDAV_NO_CHECK_CERTIFICATE}" = "true" ]; then
+          set -- "$$@" --no-check-certificate
+        fi
+        echo "Performing initial WebDAV synchronization..."
+        "$$@"
         date -Iseconds > /vault/.webdav-sync-ready
         echo "Initial synchronization completed."
     environment:
-      RCLONE_CONFIG_NAS_WEBDAV_TYPE: webdav
-      RCLONE_CONFIG_NAS_WEBDAV_URL: ${WEBDAV_URL}
-      RCLONE_CONFIG_NAS_WEBDAV_VENDOR: ${WEBDAV_VENDOR}
-      RCLONE_CONFIG_NAS_WEBDAV_USER: ${WEBDAV_USERNAME}
-      RCLONE_CONFIG_NAS_WEBDAV_PASS: ${WEBDAV_PASSWORD_OBSCURED}
+      RCLONE_CONFIG_NASWEBDAV_TYPE: webdav
+      RCLONE_CONFIG_NASWEBDAV_URL: ${WEBDAV_URL}
+      RCLONE_CONFIG_NASWEBDAV_VENDOR: ${WEBDAV_VENDOR}
+      RCLONE_CONFIG_NASWEBDAV_USER: ${WEBDAV_USERNAME}
+      RCLONE_CONFIG_NASWEBDAV_PASS: ${WEBDAV_PASSWORD_OBSCURED}
       WEBDAV_REMOTE_PATH: ${WEBDAV_REMOTE_PATH}
+      WEBDAV_NO_CHECK_CERTIFICATE: ${WEBDAV_NO_CHECK_CERTIFICATE}
     volumes:
       - vault-data:/vault
     networks:
@@ -46,19 +55,27 @@ services:
     command:
       - |
         set -eu
+        REMOTE="naswebdav:"
+        if [ -n "${WEBDAV_REMOTE_PATH}" ]; then
+          REMOTE="naswebdav:${WEBDAV_REMOTE_PATH}"
+        fi
+        set -- rclone sync "$$REMOTE" /vault \
+          --create-empty-src-dirs \
+          --delete-during \
+          --exclude "/.markdown_vault_mcp/**" \
+          --exclude "/.git/**" \
+          --exclude "/.trash/**" \
+          --transfers 4 \
+          --checkers 8 \
+          --retries 5 \
+          --low-level-retries 10 \
+          --log-level INFO
+        if [ "${WEBDAV_NO_CHECK_CERTIFICATE}" = "true" ]; then
+          set -- "$$@" --no-check-certificate
+        fi
         while true; do
           echo "Synchronizing vault from WebDAV..."
-          if rclone sync nas-webdav:"${WEBDAV_REMOTE_PATH}" /vault \
-            --create-empty-src-dirs \
-            --delete-during \
-            --exclude "/.markdown_vault_mcp/**" \
-            --exclude "/.git/**" \
-            --exclude "/.trash/**" \
-            --transfers 4 \
-            --checkers 8 \
-            --retries 5 \
-            --low-level-retries 10 \
-            --log-level INFO; then
+          if "$$@"; then
               date -Iseconds > /vault/.webdav-sync-ready
               echo "Synchronization completed."
           else
@@ -67,12 +84,13 @@ services:
           sleep "${SYNC_INTERVAL_SECONDS}"
         done
     environment:
-      RCLONE_CONFIG_NAS_WEBDAV_TYPE: webdav
-      RCLONE_CONFIG_NAS_WEBDAV_URL: ${WEBDAV_URL}
-      RCLONE_CONFIG_NAS_WEBDAV_VENDOR: ${WEBDAV_VENDOR}
-      RCLONE_CONFIG_NAS_WEBDAV_USER: ${WEBDAV_USERNAME}
-      RCLONE_CONFIG_NAS_WEBDAV_PASS: ${WEBDAV_PASSWORD_OBSCURED}
+      RCLONE_CONFIG_NASWEBDAV_TYPE: webdav
+      RCLONE_CONFIG_NASWEBDAV_URL: ${WEBDAV_URL}
+      RCLONE_CONFIG_NASWEBDAV_VENDOR: ${WEBDAV_VENDOR}
+      RCLONE_CONFIG_NASWEBDAV_USER: ${WEBDAV_USERNAME}
+      RCLONE_CONFIG_NASWEBDAV_PASS: ${WEBDAV_PASSWORD_OBSCURED}
       WEBDAV_REMOTE_PATH: ${WEBDAV_REMOTE_PATH}
+      WEBDAV_NO_CHECK_CERTIFICATE: ${WEBDAV_NO_CHECK_CERTIFICATE}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
     volumes:
       - vault-data:/vault

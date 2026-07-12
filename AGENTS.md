@@ -17,9 +17,12 @@
 - Sync is intentionally one-way: `rclone sync` mirrors `NAS WebDAV -> /vault`. Do not introduce workflows that treat the Docker mirror as writable state.
 - `vault-sync` logs failures and keeps the previous mirror instead of deleting local data after a failed sync. Keep that failure behavior intact unless explicitly changing recovery semantics.
 - `markdown-vault-mcp` is deliberately read-only via `MARKDOWN_VAULT_MCP_READ_ONLY=true`.
+- The rclone remote is env-defined and name-sensitive: `compose.yaml` uses remote name `naswebdav`, so the env vars must stay `RCLONE_CONFIG_NASWEBDAV_*`.
 - Exclusions matter in two places:
   - `rclone sync` excludes `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
   - MCP excludes `.obsidian/**,.trash/**,.git/**,.webdav-sync-ready`
+- `WEBDAV_URL` may point either at the WebDAV base or directly at the vault root. If it points at the vault root, `WEBDAV_REMOTE_PATH` should be empty.
+- `WEBDAV_NO_CHECK_CERTIFICATE=true` exists for NAS setups with self-signed certs or IP/hostname certificate mismatches. Do not remove it unless the deploy model changes.
 
 ## Runtime Facts
 - Host endpoint: `http://HOST:8019/mcp`
