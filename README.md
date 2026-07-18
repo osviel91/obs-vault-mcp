@@ -7,6 +7,7 @@ A Portainer-ready Docker Compose stack that:
 3. Indexes the mirrored Markdown vault.
 4. Exposes the knowledge base through a read-only MCP endpoint.
 5. Exposes a separate writer MCP that updates the source WebDAV vault safely for curator-style agents.
+6. Exposes a thin context MCP (`curator-context-mcp`) that turns one curator question into a curated context object by calling the read-only reader once.
 
 ## Architecture
 
@@ -28,6 +29,10 @@ Docker named volume: obsidian-knowledge-vault
             +--> full-text index
             +--> semantic embeddings
             +--> MCP: http://HOST:8019/mcp
+            |
+            +--> curator-context-mcp (RAG-lite curated context)
+                    |
+                    +--> MCP: http://HOST:8021/mcp
 ```
 
 The NAS WebDAV vault is the source of truth and is shared directly with your Obsidian clients over WebDAV. The Docker volume is only a disposable local mirror for indexing and read/search MCP access. Curator-style writes go through a separate writer MCP so agents do not edit the disposable mirror.
@@ -41,6 +46,7 @@ Final access model:
 - Obsidian clients on desktop/mobile: direct WebDAV read/write to the NAS vault
 - Hermes read/search/analysis: `markdown-vault-mcp` on `8019`, backed by the mirrored local volume
 - Hermes curator writes: `vault-writer-mcp` on `8020`, backed by direct WebDAV access to the source vault
+- Hermes curated context (RAG-lite): `curator-context-mcp` on `8021`, a thin read-only post-processor that calls the reader over MCP-HTTP and buckets the hits (heuristics, decisions, contradictions, MOCs, obsoletas) so the Curator gets one curated context object per question
 
 That split is intentional:
 
@@ -80,6 +86,10 @@ The filesystem watcher is intentionally disabled (`MARKDOWN_VAULT_MCP_FILE_WATCH
 ### `vault-writer-mcp`
 
 Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, and archive redundancies without writing into the disposable mirror.
+
+### `curator-context-mcp`
+
+A thin read-only MCP service (`http://HOST:8021/mcp`) that exposes a single tool, `consultar_contexto`, intended as the Curator's first call when tackling a task. For a given question it issues one hybrid `search` against the reader, then classifies each hit by its path into logical buckets (`Curator/heuristics`, `Curator/decisions`, `Curator/contradictions`, `MOCs/...`, `.curator-archive/...`) and downweights weak sources into a separate `obsoletas_o_baja_confianza` bucket, applies a 2x score boost to heuristics and MOCs, dedupes per path, and returns a single dict with `summary`, `mocs_relevantes`, `heuristicas`, `decisiones`, `contradicciones`, `obsoletas_o_baja_confianza`, and `metricas`. It never invokes an LLM and never invents content; the `summary` field is a deterministic digest (hit counts + top path + bucket breakdown). `perfil_origen` is recorded only for traceability in `metricas`. It mounts no volumes: all vault access is via MCP-HTTP to `markdown-vault-mcp`.
 
 ## Hermes Profiles
 
@@ -252,6 +262,12 @@ The writer endpoint is:
 http://DOCKER_HOST_IP:8020/mcp
 ```
 
+The curator context endpoint is:
+
+```text
+http://DOCKER_HOST_IP:8021/mcp
+```
+
 Use the Docker host's LAN IP from another container or machine. Do not use `localhost` from Hermes when Hermes runs on another host.
 
 ## Connect Hermes
@@ -280,10 +296,17 @@ Transport: Streamable HTTP
 URL: http://DOCKER_HOST_IP:8020/mcp
 ```
 
+```text
+Name: curator-context-mcp
+Transport: Streamable HTTP
+URL: http://DOCKER_HOST_IP:8021/mcp
+```
+
 Recommended role split inside Hermes:
 
 - `obsidian-knowledge`: search, read, backlinks, semantic discovery, context gathering
 - `vault-writer-mcp`: write, move, archive, frontmatter updates, link insertion
+- `curator-context-mcp`: one-shot curated context per question (`consultar_contexto`)
 
 ## Curator Writer MCP
 
@@ -291,6 +314,7 @@ Use the two MCP endpoints for different jobs:
 
 - `http://DOCKER_HOST_IP:8019/mcp`: read/search/index endpoint backed by the local mirror
 - `http://DOCKER_HOST_IP:8020/mcp`: write endpoint backed by direct WebDAV access
+- `http://DOCKER_HOST_IP:8021/mcp`: curated context endpoint (`consultar_contexto`) backed by MCP-HTTP to the reader
 
 The writer MCP currently exposes note-focused tools for safe curation work:
 

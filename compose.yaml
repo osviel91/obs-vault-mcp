@@ -192,6 +192,39 @@ services:
       retries: 5
       start_period: 120s
 
+  curator-context-mcp:
+    build:
+      context: ./curator-context-mcp
+    container_name: curator-context-mcp
+    restart: unless-stopped
+    depends_on:
+      markdown-vault-mcp:
+        condition: service_healthy
+    environment:
+      READER_MCP_URL: http://markdown-vault-mcp:8000/mcp
+      READER_TIMEOUT: "10.0"
+      CONSULTAR_SEARCH_POOL: "50"
+      CONSULTAR_CAP_MOCS: "5"
+      CONSULTAR_CAP_DECISIONES: "5"
+      CONSULTAR_CAP_OBSOLETAS: "5"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: "8000"
+    ports:
+      - "8021:8000"
+    networks:
+      - knowledge-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+          >/dev/null 2>&1 || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
   vault-writer-mcp:
     build:
       context: ./vault-writer-mcp
