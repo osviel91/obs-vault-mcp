@@ -30,7 +30,7 @@ mcp = FastMCP(
         "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
-    version="0.1.2",
+    version="0.1.3",
 )
 
 
@@ -221,20 +221,23 @@ def _pick(hits: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _maybe_normalize_scores(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # ponytail: el score hybrid (RRF) del reader no siempre está en [0,1].
-    # Si el max > 1, dividimos por max para comparar contra umbral_similitud.
-    # Si el reader ya normaliza, este paso es identidad.
+    # ponytail: el reader devuelve escalas distintas según el modo:
+    #   - keyword (BM25): score 0..~10
+    #   - hybrid (RRF):    score ~1/(60+rank) -> 0.016 típico (pequeño pero <=1)
+    #   - semantic:        score en [0,1] (similitud coseno)
+    # El umbral_similitud del caller está pensado en escala 0..1 (top=1.0).
+    # Por eso normalizamos SIEMPRE por el max del pool, sin importar la escala
+    # cruda del reader. Sin este paso, RRF (top~0.016) nunca pasa umbral 0.4.
     scores = [h.get("score") or 0.0 for h in hits]
     if not scores:
         return hits
     mx = max(scores)
-    if mx > 1.0:
+    if mx > 0:
         for h in hits:
-            if h.get("score") is not None:
-                h["_score_norm"] = h["score"] / mx
+            h["_score_norm"] = (h.get("score") or 0.0) / mx
     else:
         for h in hits:
-            h["_score_norm"] = h.get("score") or 0.0
+            h["_score_norm"] = 0.0
     return hits
 
 
@@ -459,7 +462,28 @@ def _demo() -> None:
             ("Nota baja confianza", "obsoletas_o_baja_confianza"),
         ], (f, b)
     _maybe_normalize_scores(fixtures)
-    assert fixtures[0]["_score_norm"] == 0.9  # ya en [0,1]: identidad
+    # Normalización por max del pool: top hit (inbox, score 0.95) debe quedar en 1.0.
+    top = max(fixtures, key=lambda x: x.get("score") or 0.0)
+    assert abs(top["_score_norm"] - 1.0) < 1e-9
+    # fixtures[0] (heurística h1, score 0.9) debe quedar en 0.9/0.95 ~ 0.947.
+    assert abs(fixtures[0]["_score_norm"] - 0.9473684210526316) < 1e-9
+    # Fixture RRF: scores como 1/(60+rank) (~0.016 top). Sin normalizar
+    # siempre, jamás pasarían umbral_similitud=0.4. Confirma que normalizamos
+    # sin importar la escala cruda.
+    rrf = [
+        {"path": "Curator/heuristics/top.md", "score": 0.0164},
+        {"path": "Curator/heuristics/second.md", "score": 0.0143},
+        {"path": "Nota noise.md", "score": 0.0080},
+    ]
+    _maybe_normalize_scores(rrf)
+    assert rrf[0]["_score_norm"] == 1.0
+    assert abs(rrf[1]["_score_norm"] - 0.872) < 0.001
+    assert abs(rrf[2]["_score_norm"] - 0.488) < 0.001
+    # Fixture BM25: scores grandes (8.07). Misma normalización aporta top=1.0.
+    bm25 = [{"path": "a.md", "score": 8.07}, {"path": "b.md", "score": 4.5}]
+    _maybe_normalize_scores(bm25)
+    assert bm25[0]["_score_norm"] == 1.0
+    assert abs(bm25[1]["_score_norm"] - 0.558) < 0.001
     # boost 2x heurísticas + MOCs:
     assert BUCKET_WEIGHTS["heuristicas"] == 2.0
     assert BUCKET_WEIGHTS["mocs"] == 2.0
