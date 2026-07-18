@@ -30,7 +30,7 @@ mcp = FastMCP(
         "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
-    version="0.1.0",
+    version="0.1.1",
 )
 
 
@@ -91,14 +91,28 @@ class ReaderClient:
 
 
 def _parse_tool_text(result: dict[str, Any]) -> Any:
+    # Prefer structuredContent (native, no double-serialization).
+    sc = result.get("structuredContent")
+    if isinstance(sc, dict) and "result" in sc:
+        return sc["result"]
+    # Fallback: content[0].text puede venir doble-serializado.
     content = result.get("content") or []
     if not content:
         raise ContextError("reader returned empty content")
     text = content[0].get("text", "")
+    if not text:
+        raise ContextError("reader returned empty text")
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ContextError(f"reader returned non-JSON text: {exc}") from exc
+    # ponytail: el reader v3.4.2 a veces devuelve un string serializado otra vez.
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError as exc:
+            raise ContextError(f"reader returned double-serialized non-JSON: {exc}") from exc
+    return parsed
 
 
 def _extract_hits(payload: Any) -> list[dict[str, Any]]:
@@ -412,7 +426,27 @@ def _demo() -> None:
     # boost 2x heurísticas + MOCs:
     assert BUCKET_WEIGHTS["heuristicas"] == 2.0
     assert BUCKET_WEIGHTS["mocs"] == 2.0
-    print("ok: classify + dedup + boost")
+
+    # Fix double-serialized search response (markdown-vault-mcp v3.4.2).
+    hits_native = [{"path": "Curator/heuristics/x.md", "score": 8.07}]
+    # Fixture 1: structuredContent.result presente (path feliz).
+    r1 = {
+        "content": [{"type": "text", "text": json.dumps(json.dumps(hits_native))}],
+        "structuredContent": {"result": hits_native},
+    }
+    assert _parse_tool_text(r1) is hits_native or _parse_tool_text(r1) == hits_native
+    # Fixture 2: sin structuredContent, text doble-serializado (fallback).
+    r2 = {"content": [{"type": "text", "text": json.dumps(json.dumps(hits_native))}]}
+    assert _parse_tool_text(r2) == hits_native
+    # Fixture 3: sin content ni structuredContent -> error limpio.
+    r3: dict[str, Any] = {}
+    try:
+        _parse_tool_text(r3)
+    except ContextError:
+        pass
+    else:
+        raise AssertionError("expected ContextError for empty reader response")
+    print("ok: classify + dedup + boost + double-serialize fix")
 
 
 if __name__ == "__main__":
