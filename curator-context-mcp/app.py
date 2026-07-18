@@ -30,12 +30,35 @@ mcp = FastMCP(
         "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
-    version="0.1.1",
+    version="0.1.2",
 )
 
 
 class ContextError(ValueError):
     pass
+
+
+def _parse_response_body(ct: str, text: str, *, expects_response: bool) -> dict[str, Any]:
+    # Notificaciones JSON-RPC (sin `id`) no generan body: 202 Accepted vacío.
+    if not text:
+        if expects_response:
+            raise ContextError("reader returned empty body for request")
+        return {}
+    if "text/event-stream" in ct:
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data: "):
+                return json.loads(line[6:])
+        if expects_response:
+            raise ContextError("SSE response without data event")
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ContextError(f"reader returned non-JSON body: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ContextError(f"reader returned non-object JSON: {type(parsed).__name__}")
+    return parsed
 
 
 # ponytail: cliente JSON-RPC mínimo sobre streamable HTTP del MCP del reader.
@@ -45,6 +68,7 @@ class ReaderClient:
         self._url = url
         self._client = httpx.Client(timeout=timeout)
         self._session_id: str | None = None
+        self._req_id = 0
 
     def _headers(self) -> dict[str, str]:
         h = {"Accept": "application/json, text/event-stream"}
@@ -52,34 +76,41 @@ class ReaderClient:
             h["Mcp-Session-Id"] = self._session_id
         return h
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any], *, expects_response: bool = True) -> dict[str, Any]:
         resp = self._client.post(self._url, json=payload, headers=self._headers())
         sid = resp.headers.get("Mcp-Session-Id")
         if sid:
             self._session_id = sid
-        ct = resp.headers.get("content-type", "")
-        if "text/event-stream" in ct:
-            for line in resp.text.splitlines():
-                line = line.strip()
-                if line.startswith("data: "):
-                    return json.loads(line[6:])
-            raise ContextError("SSE response without data event")
-        return resp.json()
+        if resp.status_code >= 400:
+            raise ContextError(f"reader HTTP {resp.status_code}: {resp.text[:200]}")
+        return _parse_response_body(
+            resp.headers.get("content-type", ""),
+            resp.text,
+            expects_response=expects_response,
+        )
 
     def initialize(self) -> None:
         self._post({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "jsonrpc": "2.0", "id": self._next_id(), "method": "initialize",
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "curator-context-mcp", "version": "0.1.0"},
+                "clientInfo": {"name": "curator-context-mcp", "version": "0.1.2"},
             },
         })
-        self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        # notifications/initialized es notificación JSON-RPC (sin id) -> sin respuesta.
+        self._post(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            expects_response=False,
+        )
+
+    def _next_id(self) -> int:
+        self._req_id += 1
+        return self._req_id
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         resp = self._post({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "jsonrpc": "2.0", "id": self._next_id(), "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         })
         if "error" in resp:
@@ -288,7 +319,7 @@ def consultar_contexto(
     try:
         try:
             client.initialize()
-        except (httpx.HTTPError, ContextError) as exc:
+        except (httpx.HTTPError, json.JSONDecodeError, ContextError) as exc:
             metricas["error"] = f"reader initialize failed: {exc}"
             metricas["error_index_not_ready"] = True
             empty["summary"] = "reader no responde a initialize; reintenta en unos segundos"
@@ -299,7 +330,7 @@ def consultar_contexto(
             status_raw = client.call_tool("get_index_status", {})
             status = _parse_tool_text(status_raw)
             queryable = bool(status.get("queryable", True)) if isinstance(status, dict) else True
-        except (httpx.HTTPError, ContextError):
+        except (httpx.HTTPError, json.JSONDecodeError, ContextError):
             queryable = True  # ponytail: si la llamada falla, asumimos queryable
         metricas["reader_queryable"] = queryable
         if not queryable:
@@ -309,17 +340,23 @@ def consultar_contexto(
             return empty
 
         # Una sola llamada search.
-        search_raw = client.call_tool("search", {
-            "query": pregunta,
-            "limit": SEARCH_POOL,
-            "mode": "hybrid",
-        })
-        payload = _parse_tool_text(search_raw)
-        if isinstance(payload, dict) and not isinstance(payload.get("results"), list):
-            # Capturar keys para debug si el reader cambia el shape.
-            metricas["reader_payload_keys"] = list(payload.keys())
-        hits = _extract_hits(payload)
-        metricas["total_hits"] = len(hits)
+        try:
+            search_raw = client.call_tool("search", {
+                "query": pregunta,
+                "limit": SEARCH_POOL,
+                "mode": "hybrid",
+            })
+            payload = _parse_tool_text(search_raw)
+            if isinstance(payload, dict) and not isinstance(payload.get("results"), list):
+                # Capturar keys para debug si el reader cambia el shape.
+                metricas["reader_payload_keys"] = list(payload.keys())
+            hits = _extract_hits(payload)
+            metricas["total_hits"] = len(hits)
+        except (httpx.HTTPError, json.JSONDecodeError, ContextError) as exc:
+            metricas["error"] = f"reader search failed: {exc}"
+            metricas["error_index_not_ready"] = True
+            empty["summary"] = f"reader search failed: {exc}"
+            return empty
     finally:
         client.close()
 
@@ -446,7 +483,38 @@ def _demo() -> None:
         pass
     else:
         raise AssertionError("expected ContextError for empty reader response")
-    print("ok: classify + dedup + boost + double-serialize fix")
+    # Fix notifications/initialized: el reader responde 202 Accepted sin body.
+    # _parse_response_body debe tratar body vacío como OK si expects_response=False.
+    assert _parse_response_body("application/json", "", expects_response=False) == {}
+    # Y como error si expects_response=True.
+    try:
+        _parse_response_body("application/json", "", expects_response=True)
+    except ContextError:
+        pass
+    else:
+        raise AssertionError("expected ContextError for empty body with expects_response=True")
+    # SSE con data: {...} -> dict parseado.
+    sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n"
+    assert _parse_response_body("text/event-stream", sse, expects_response=True) == {
+        "jsonrpc": "2.0", "id": 2, "result": {}
+    }
+    # SSE sin data: con expects_response=True -> error limpio (no JSONDecodeError crudo).
+    try:
+        _parse_response_body("text/event-stream", "event: ping\n\n", expects_response=True)
+    except ContextError:
+        pass
+    else:
+        raise AssertionError("expected ContextError for SSE without data event")
+    # SSE sin data: con expects_response=False -> {}.
+    assert _parse_response_body("text/event-stream", "event: ping\n\n", expects_response=False) == {}
+    # Body non-JSON con expects_response=True -> ContextError con mensaje limpio.
+    try:
+        _parse_response_body("application/json", "not-json", expects_response=True)
+    except ContextError as exc:
+        assert "non-JSON" in str(exc), str(exc)
+    else:
+        raise AssertionError("expected ContextError for non-JSON body")
+    print("ok: classify + dedup + boost + double-serialize fix + notification handling")
 
 
 if __name__ == "__main__":
