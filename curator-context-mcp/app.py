@@ -30,7 +30,7 @@ mcp = FastMCP(
         "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
-    version="0.1.4",
+    version="0.1.5",
 )
 
 
@@ -397,11 +397,13 @@ def consultar_contexto(
     finally:
         client.close()
 
-    # Normalizar score por max si el reader devuelve RRF no normalizado.
-    _maybe_normalize_scores(hits)
-
-    # Clasificar + filtrar por umbral.
-    classified: list[dict[str, Any]] = []
+    # Clasificar PRIMERO y descartar paths que no vayan a buckets válidos.
+    # ponytail: normalizar sobre el subconjunto clasificado, no sobre los 50 hits.
+    # Si el top RRF es una daily-note random y la heurística relevante está al
+    # rank ~15, normalizar sobre el pool completo hunde la heurística (~0.3) por
+    # debajo del umbral. Re-normalizar sobre el subconjunto relevante pone el top
+    # heurística/MOC/.../ en 1.0, que es lo que el caller espera del umbral.
+    categorized: list[dict[str, Any]] = []
     buckets_descartados = 0
     for h in hits:
         path = h.get("path") or h.get("Path") or ""
@@ -410,10 +412,36 @@ def consultar_contexto(
         if bucket is None:
             buckets_descartados += 1
             continue
+        categorized.append({"_raw": h, "_bucket": bucket})
+
+    # Normalizar scores SOLO sobre el subconjunto clasificado.
+    subset = [c["_raw"] for c in categorized]
+    _maybe_normalize_scores(subset)
+    top_subset = sorted(
+        (
+            {
+                "path": h.get("path") or h.get("Path") or "",
+                "score_raw": h.get("score"),
+                "score_norm": h.get("_score_norm"),
+            }
+            for h in subset
+        ),
+        key=lambda x: x.get("score_norm") or 0.0,
+        reverse=True,
+    )[:3]
+    logger.info("consultar_contexto subset top3=%s", top_subset)
+
+    # Filtrar por umbral + ensamblar la lista clasificada.
+    classified: list[dict[str, Any]] = []
+    for c in categorized:
+        h = c["_raw"]
+        bucket = c["_bucket"]
         score_norm = h.get("_score_norm", 0.0)
         if score_norm < umbral_similitud:
             continue
         weight = BUCKET_WEIGHTS.get(bucket, 1.0)
+        path = h.get("path") or h.get("Path") or ""
+        snippet = h.get("content") or h.get("snippet") or ""
         classified.append({
             "path": path,
             "title": h.get("title") or h.get("heading") or "",
@@ -609,6 +637,44 @@ def _demo() -> None:
     _maybe_normalize_scores(h)
     assert h[0]["_score_norm"] == 1.0
     print("ok: classify + dedup + boost + double-serialize fix + notification handling + sse-shape real")
+
+    # Fix v0.1.5 -- normalización por subconjunto clasificado.
+    # Fixture: 5 hits donde el top raw es una daily-note (path no Curator)
+    # y la heurística relevante está al rank 3. Normalizando sobre el pool
+    # completo, la heurística quedaría con score_norm ~0.13/0.20 = 0.65 (ok),
+    # PERO si el reader devuelve 50 hits con muchos.Path basura al top, la
+    # heurística cae bajo umbral. Simulamos ese caso: top=0.134 basura,heur
+    # al rank 5 con raw 0.04. Normalización global -> 0.30 (fail 0.4).
+    # Normalización por subconjunto -> 1.0 (pass 0.4).
+    pool = [
+        {"path": "Daily/2026-01-01.md", "score": 0.134},
+        {"path": "Daily/2026-01-02.md", "score": 0.110},
+        {"path": "Notas/random1.md", "score": 0.080},
+        {"path": "Notas/random2.md", "score": 0.060},
+        {"path": "Curator/heuristics/h1.md", "score": 0.040},
+        {"path": "MOCs/cluster.md", "score": 0.030},
+    ]
+    # Replicar el flujo del tool: clasificar -> descartar None -> normalizar subset.
+    cat: list[dict[str, Any]] = []
+    for h in pool:
+        b = classify(h["path"], h.get("content", ""))
+        if b is None:
+            continue
+        cat.append({"_raw": h, "_bucket": b})
+    sub = [c["_raw"] for c in cat]
+    _maybe_normalize_scores(sub)
+    # Heurística (raw 0.04) es el top del subconjunto (0.04 > 0.03 de MOC).
+    # Tras re-normalizar: 1.0. Umbral 0.4 -> pass.
+    heur_hit = next(c for c in cat if c["_bucket"] == "heuristicas")["_raw"]
+    moc_hit = next(c for c in cat if c["_bucket"] == "mocs")["_raw"]
+    assert heur_hit["_score_norm"] == 1.0, heur_hit["_score_norm"]
+    assert abs(moc_hit["_score_norm"] - 0.75) < 1e-9, moc_hit["_score_norm"]
+    # Si normalizáramos sobre el pool completo (top 0.134 global), heuristic quedaría en 0.298.
+    pool_copy = [dict(h) for h in pool]
+    _maybe_normalize_scores(pool_copy)
+    assert abs(pool_copy[4]["_score_norm"] - 0.04 / 0.134) < 1e-9
+    assert pool_copy[4]["_score_norm"] < 0.4  # confirmaría el bug viejo
+    print("ok: classify + dedup + boost + double-serialize fix + notification handling + sse-shape real + subset normalization")
 
 
 if __name__ == "__main__":
