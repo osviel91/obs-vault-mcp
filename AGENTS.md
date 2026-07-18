@@ -7,6 +7,7 @@
 - `compose.yaml`: source of truth for service wiring, env vars, volumes, healthcheck, port mapping, and startup order.
 - `.env.example`: source of truth for required stack variables and expected defaults.
 - `README.md`: operational workflow for Portainer deploys and runtime verification.
+- `vault-ingest/ingest.py`: source of truth for non-Markdown shadow-note extraction and PDF OCR behaviour.
 - `vault-writer-mcp/app.py`: source of truth for curator write safety rules and available write tools.
 - `curator-context-mcp/app.py`: source of truth for the `consultar_contexto` RAG-lite context tool (classification buckets, boost rules, drift behaviour).
 - `hermes/knowledge-curator.md`: source of truth for the Hermes curator profile prompt and the intended two-MCP operating model.
@@ -25,9 +26,10 @@
 - The writer also exposes a public `request_sync` tool that drops a sync request without performing a writer mutation. Use it when a human edits the vault through NAS WebDAV directly and a curator wants the mirror refreshed on demand.
 - Forcing a reindex of the read-only reader (`markdown-vault-mcp`) is the responsibility of the reader, not the writer. Agents should call the reader's own `reindex` / `build_embeddings` / `get_index_status` tools; the writer does not bridge to the reader.
 - `MARKDOWN_VAULT_MCP_FILE_WATCHER=false` is set on purpose: the local mirror is populated by `vault-sync` from another container, and inotify does not see cross-container writes. Do not re-enable the watcher without first proving external edits land in the same container as the reader.
+- `vault-ingest` writes extracted shadow notes under `/.ingest/**` inside the mirror only. Do not sync that path back to WebDAV, and do not exclude it from the reader: the whole point is that `markdown-vault-mcp` indexes those generated Markdown shadows.
 - The rclone remote is env-defined and name-sensitive: `compose.yaml` uses remote name `naswebdav`, so the env vars must stay `RCLONE_CONFIG_NASWEBDAV_*`.
 - Exclusions matter in two places:
-  - `rclone sync` excludes `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
+  - `rclone sync` excludes `/.ingest/**`, `/.markdown_vault_mcp/**`, `/.git/**`, and `/.trash/**`
   - MCP excludes `.obsidian/**,.trash/**,.git/**,.webdav-sync-ready`
 - `WEBDAV_URL` may point either at the WebDAV base or directly at the vault root. If it points at the vault root, `WEBDAV_REMOTE_PATH` should be empty.
 - `WEBDAV_NO_CHECK_CERTIFICATE=true` exists for NAS setups with self-signed certs or IP/hostname certificate mismatches. Do not remove it unless the deploy model changes.
@@ -52,11 +54,14 @@
 - Validate Compose after edits: `docker compose --env-file .env.example config`
 - Validate writer syntax after edits: `python3 -m py_compile vault-writer-mcp/app.py`
 - Validate context service syntax after edits: `python3 -m py_compile curator-context-mcp/app.py`
+- Validate ingest service syntax after edits: `python3 -m py_compile vault-ingest/ingest.py`
+- Run the ingest service self-check (no container needed): `python3 vault-ingest/ingest.py selfcheck`
 - Run the context service self-check (no container needed): `python3 curator-context-mcp/app.py selfcheck`
 - Check initial sync: `docker logs obsidian-vault-init`
 - Follow periodic sync: `docker logs -f obsidian-vault-sync`
 - Inspect mirrored files without the rclone entrypoint: `docker run --rm -v obsidian-knowledge-vault:/vault alpine find /vault -maxdepth 2 -type f`
 - Follow MCP logs: `docker logs -f markdown-vault-mcp`
+- Follow ingest logs: `docker logs -f obsidian-vault-ingest`
 - Follow writer logs: `docker logs -f vault-writer-mcp`
 - Follow context service logs: `docker logs -f curator-context-mcp`
 - Trigger an immediate sync loop iteration: `docker restart obsidian-vault-sync`

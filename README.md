@@ -5,9 +5,10 @@ A Portainer-ready Docker Compose stack that:
 1. Lets Obsidian desktop/mobile clients edit the vault directly over WebDAV.
 2. Keeps the local mirror refreshed on a schedule.
 3. Indexes the mirrored Markdown vault.
-4. Exposes the knowledge base through a read-only MCP endpoint.
-5. Exposes a separate writer MCP that updates the source WebDAV vault safely for curator-style agents.
-6. Exposes a thin context MCP (`curator-context-mcp`) that turns one curator question into a curated context object by calling the read-only reader once.
+4. Extracts non-Markdown vault documents into mirror-local Markdown shadow notes (with optional PDF OCR) so the reader can index them too.
+5. Exposes the knowledge base through a read-only MCP endpoint.
+6. Exposes a separate writer MCP that updates the source WebDAV vault safely for curator-style agents.
+7. Exposes a thin context MCP (`curator-context-mcp`) that turns one curator question into a curated context object by calling the read-only reader once.
 
 ## Architecture
 
@@ -23,6 +24,8 @@ NAS WebDAV (source of truth)
     | rclone sync
     v
 Docker named volume: obsidian-knowledge-vault
+    |
+    +--> vault-ingest (/vault/.ingest shadow notes, optional PDF OCR)
     |
     +--> markdown-vault-mcp (Hermes read/search path)
             |
@@ -45,6 +48,7 @@ Final access model:
 
 - Obsidian clients on desktop/mobile: direct WebDAV read/write to the NAS vault
 - Hermes read/search/analysis: `markdown-vault-mcp` on `8019`, backed by the mirrored local volume
+- Hermes document extraction for PDFs/docx/etc.: `vault-ingest`, which writes mirror-local Markdown shadow notes under `/.ingest` so the reader can index non-Markdown content too
 - Hermes curator writes: `vault-writer-mcp` on `8020`, backed by direct WebDAV access to the source vault
 - Hermes curated context (RAG-lite): `curator-context-mcp` on `8021`, a thin read-only post-processor that calls the reader over MCP-HTTP and buckets the hits (heuristics, decisions, contradictions, MOCs, obsoletas) so the Curator gets one curated context object per question
 
@@ -86,6 +90,12 @@ The filesystem watcher is intentionally disabled (`MARKDOWN_VAULT_MCP_FILE_WATCH
 ### `vault-writer-mcp`
 
 Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, and archive redundancies without writing into the disposable mirror.
+
+### `vault-ingest`
+
+Scans the mirrored vault for non-Markdown documents (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`, `.csv`, `.json`, `.txt`, `.doc`) and writes extracted Markdown shadow notes under `/.ingest` inside the mirror. Those generated files are excluded from `rclone sync` so they stay mirror-local and do not pollute the source WebDAV vault.
+
+For PDFs, `vault-ingest` can run `ocrmypdf` first (`OCR_PDFS=true`) so scanned/image-only PDFs become searchable too. Each shadow note stores `source_path`, `source_sha256`, `source_mtime`, `ingest_kind: shadow`, and `ocr_applied` in frontmatter so agents can trace the extracted text back to the original document.
 
 ### `curator-context-mcp`
 
@@ -204,6 +214,9 @@ Set it to the full Portainer stack webhook URL. Keep it in GitHub Secrets, not i
 | `WEBDAV_PASSWORD_OBSCURED` | output of `rclone obscure` |
 | `WEBDAV_NO_CHECK_CERTIFICATE` | `false` |
 | `SYNC_INTERVAL_SECONDS` | `300` |
+| `INGEST_INTERVAL_SECONDS` | `600` |
+| `OCR_PDFS` | `true` |
+| `OCR_LANGS` | `spa+eng` |
 | `CURATOR_ARCHIVE_ROOT` | `.curator-archive` |
 | `CURATOR_ALLOW_HARD_DELETE` | `false` |
 | `PUID` | `1000` |
@@ -249,6 +262,17 @@ Look for messages indicating:
 - chunks generated
 - embeddings saved
 - Uvicorn listening on `0.0.0.0:8000`
+
+Inspect ingest logs:
+
+```bash
+docker logs -f obsidian-vault-ingest
+```
+
+Look for messages indicating:
+
+- shadow notes written under `/.ingest/...`
+- OCR applied to scanned PDFs when `OCR_PDFS=true`
 
 The external endpoint is:
 
@@ -355,16 +379,23 @@ The synchronization interval is controlled by:
 SYNC_INTERVAL_SECONDS
 ```
 
-The file watcher in `markdown-vault-mcp` detects changes inside the local mirror and updates its indexes.
+`vault-ingest` scans non-Markdown files on its own interval:
 
-In normal operation, curator writes through `vault-writer-mcp` request an immediate mirror refresh automatically. The remaining lag is usually the time for `vault-sync` to run the triggered sync and for `markdown-vault-mcp` to notice the new files inside the mirror.
+```text
+INGEST_INTERVAL_SECONDS
+```
+
+It writes generated Markdown shadow notes under `/.ingest` inside the mirror. Because the reader's file watcher is disabled by design, those shadow notes still require an explicit `reindex` (or `build_embeddings`) before they become queryable through MCP.
+
+In normal operation, curator writes through `vault-writer-mcp` request an immediate mirror refresh automatically. The remaining lag is usually the time for `vault-sync` to run the triggered sync, for `vault-ingest` to notice any changed non-Markdown documents, and for `markdown-vault-mcp` to be reindexed.
 
 ### On-demand refresh from MCP
 
 Agents and humans can force a refresh without restarting containers by combining the two MCPs:
 
 1. Call `request_sync` on the writer MCP (`8020/mcp`) to drop a sync request into the shared `sync-control` volume. `vault-sync` picks it up on its next loop iteration (within a second) and runs the per-path `copyto` cleanup.
-2. Call `reindex` on the read-only MCP (`8019/mcp`) to force a full vault reindex immediately. The reader's filesystem watcher is disabled by design (the mirror is populated by another container), so `reindex` is the only way to pick up external changes once the mirror is fresh. Use `build_embeddings` if you only need to refresh the vector index, and `get_index_status` to verify the state.
+2. Wait for the next `vault-ingest` pass if the changed content is a PDF/docx/etc. that must be extracted into `/.ingest` first.
+3. Call `reindex` on the read-only MCP (`8019/mcp`) to force a full vault reindex immediately. The reader's filesystem watcher is disabled by design (the mirror is populated by another container), so `reindex` is the only way to pick up external changes once the mirror is fresh. Use `build_embeddings` if you only need to refresh the vector index, and `get_index_status` to verify the state.
 
 If `request_sync` is called without a preceding writer mutation (e.g. a human edited the vault directly through NAS WebDAV), there is no per-path entry in `changed-paths.log`; the mirror then depends on the single cleanup `rclone sync`, which is subject to the WebDAV directory listing propagation delay (typically a few minutes). In that case, a `docker restart obsidian-vault-sync` is still the heavy hammer.
 
@@ -409,7 +440,7 @@ Deleting the MCP state volume is safe but forces a complete reindex. Deleting th
 
 ## Important behavior
 
-`rclone sync` makes the destination match the source. Files deleted remotely are deleted from the local mirror. Internal MCP state stored under `.markdown_vault_mcp` is excluded from synchronization, and the main index is kept in the separate `mcp-state` volume.
+`rclone sync` makes the destination match the source. Files deleted remotely are deleted from the local mirror. Generated shadow notes stored under `/.ingest` and internal MCP state stored under `.markdown_vault_mcp` are excluded from synchronization, and the main index is kept in the separate `mcp-state` volume.
 
 The writer MCP updates WebDAV directly, so curator changes become the new source of truth first and then flow back into the local mirror on the next sync.
 

@@ -16,6 +16,7 @@ services:
         set -- rclone sync "$$REMOTE" /vault \
           --create-empty-src-dirs \
           --delete-during \
+          --exclude "/.ingest/**" \
           --exclude "/.markdown_vault_mcp/**" \
           --exclude "/.git/**" \
           --exclude "/.trash/**" \
@@ -63,6 +64,7 @@ services:
         set -- rclone sync "$$REMOTE" /vault \
           --create-empty-src-dirs \
           --delete-during \
+          --exclude "/.ingest/**" \
           --exclude "/.markdown_vault_mcp/**" \
           --exclude "/.git/**" \
           --exclude "/.trash/**" \
@@ -191,6 +193,25 @@ services:
       timeout: 10s
       retries: 5
       start_period: 120s
+
+  vault-ingest:
+    build:
+      context: ./vault-ingest
+    container_name: obsidian-vault-ingest
+    restart: unless-stopped
+    depends_on:
+      vault-init:
+        condition: service_completed_successfully
+    environment:
+      VAULT_ROOT: /vault
+      INGEST_INTERVAL_SECONDS: ${INGEST_INTERVAL_SECONDS}
+      OCR_PDFS: ${OCR_PDFS}
+      OCR_LANGS: ${OCR_LANGS}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - vault-data:/vault
+    networks:
+      - knowledge-net
 
   curator-context-mcp:
     build:

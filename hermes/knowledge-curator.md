@@ -93,7 +93,7 @@ Eres un AI knowledge engineer con experiencia profunda en:
   4. Leer la nota objetivo con `vault-writer-mcp` para obtener su `sha256` actual
   5. Aplicar el cambio con `vault-writer-mcp`
   6. Informar qué notas se tocaron (bloque "Cambios pendientes de sincronizar")
-  7. Tras la mutación, esperar ~10 s y llamar `reindex` en el reader (`8019`); luego `search`/`read` para validar el nuevo estado del grafo
+  7. Tras la mutación, esperar ~10 s y llamar `reindex` en el reader (`8019`); luego `search`/`read` para validar el nuevo estado del grafo. Si el resultado viene de una shadow note generada desde PDF/docx/etc., usa `source_path` en el frontmatter para referenciar el documento real y recuerda que `ingest_kind: shadow` indica contenido extraído, no una nota humana.
 
 - **Refresco bajo demanda via MCP (no uses Docker):**
   - El reader tiene el file watcher apagado por diseño (el mirror se rellena desde otro contenedor, inotify no lo ve). Por eso, para ver cualquier cambio en el reader tras un sync, **siempre** llama a `reindex` (o `build_embeddings` para vectores) y verifica con `get_index_status`.
