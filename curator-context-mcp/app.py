@@ -30,7 +30,7 @@ mcp = FastMCP(
         "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
-    version="0.1.5",
+    version="0.1.6",
 )
 
 
@@ -180,6 +180,8 @@ def classify(path: str, snippet: str = "") -> str | None:
     p = _norm_path(path)
     if not p:
         return None
+    if p.startswith("excalidraw/") or p.startswith("excalidraw/scripts/downloaded/"):
+        return None
     if p.startswith("curator/inbox/") or p.startswith("inbox/"):
         return None
     if ".curator-archive/" in p or p.startswith(".curator-archive/"):
@@ -224,6 +226,92 @@ def _pick(hits: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _basename_title(path: str) -> str:
+    base = os.path.basename(path or "")
+    if base.lower().endswith(".md"):
+        base = base[:-3]
+    return base
+
+
+def _project_title(hit: dict[str, Any]) -> str:
+    title = hit.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    heading = hit.get("heading")
+    if isinstance(heading, str) and heading.strip():
+        return heading.strip()
+    return _basename_title(hit.get("path") or hit.get("Path") or "")
+
+
+def _truncate(text: str, limit: int = 180) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def _project_snippet(hit: dict[str, Any]) -> str:
+    sections = hit.get("sections")
+    if isinstance(sections, list) and sections:
+        first = sections[0]
+        if isinstance(first, dict):
+            content = first.get("content")
+            if isinstance(content, str) and content.strip():
+                return _truncate(content)
+    content = hit.get("content")
+    if isinstance(content, str) and content.strip():
+        return _truncate(content)
+    snippet = hit.get("snippet")
+    if isinstance(snippet, str) and snippet.strip():
+        return _truncate(snippet)
+    heading = hit.get("heading")
+    if isinstance(heading, str) and heading.strip():
+        return heading.strip()
+    return ""
+
+
+def _project_tags(hit: dict[str, Any]) -> list[str]:
+    for source in (hit, hit.get("frontmatter") if isinstance(hit.get("frontmatter"), dict) else None):
+        if not isinstance(source, dict):
+            continue
+        tags = source.get("tags")
+        if isinstance(tags, list):
+            return [str(tag).strip() for tag in tags if str(tag).strip()]
+        if isinstance(tags, str) and tags.strip():
+            return [tags.strip()]
+    return []
+
+
+def _moc_reason(path: str, pregunta: str) -> str:
+    q = pregunta.lower()
+    if "zigbee" in q or "home assistant" in q or "smarthome" in q or "smart home" in q:
+        return "Agrupa notas del dominio SmartHome relacionadas con Zigbee y Home Assistant"
+    if any(token in q for token in ("infra", "homelab", "docker", "network", "networking")):
+        return "Sirve como índice de entrada a documentación relevante de infraestructura para este tema"
+    return "Sirve como índice de entrada a documentación relevante para este tema"
+
+
+def _project_item(hit: dict[str, Any], bucket: str, pregunta: str) -> dict[str, Any]:
+    path = hit.get("path") or hit.get("Path") or ""
+    item = {
+        "path": path,
+        "titulo": _project_title(hit),
+        "title": _project_title(hit),
+        "heading": hit.get("heading", ""),
+        "score": hit.get("score", 0.0),
+        "score_original": hit.get("score", 0.0),
+        "score_normalizado": hit.get("_score_norm", 0.0),
+        "score_ponderado": hit.get("_score_norm", 0.0) * BUCKET_WEIGHTS.get(bucket, 1.0),
+        "snippet": _project_snippet(hit),
+        "tags": _project_tags(hit),
+        "bucket": bucket,
+        "_score_norm": hit.get("_score_norm", 0.0),
+    }
+    if bucket == "mocs":
+        item["porque"] = _moc_reason(path, pregunta)
+    return item
+
+
 def _maybe_normalize_scores(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # ponytail: el reader devuelve escalas distintas según el modo:
     #   - keyword (BM25): score 0..~10
@@ -253,14 +341,11 @@ def _build_summary(
     top: dict[str, Any] | None,
 ) -> str:
     if sobre_umbral == 0:
-        return (
-            f"sin contexto suficiente; 0 hits sobre umbral {umbral} "
-            f"(pool={total})"
-        )
+        return "sin contexto relevante en el vault"
     bc = ",".join(f"{k}={v}" for k, v in buckets_count.items() if v)
     top_str = "sin top"
     if top:
-        top_str = f"top: {top['path']} (score {top['score_ponderado']:.2f})"
+        top_str = f"top: {top['path']} ({top.get('titulo') or top.get('title') or top.get('path')})"
     return (
         f"{sobre_umbral} hits sobre umbral {umbral} (pool={total}) | "
         f"{top_str} | buckets: {bc or 'ninguno'}"
@@ -316,6 +401,10 @@ def consultar_contexto(
         "reader_has_structured_content": False,
         "hits_extraidos": 0,                # len(hits) tras _extract_hits
         "hit_top_score_raw": None,          # score del top hit (raw reader), o None
+        "abstained": False,
+        "abstain_reason": None,
+        "top_bucket": "none",
+        "score_top_normalizado": None,
         "latencia_ms": 0,
         "error": None,
         "error_index_not_ready": False,
@@ -442,16 +531,7 @@ def consultar_contexto(
         weight = BUCKET_WEIGHTS.get(bucket, 1.0)
         path = h.get("path") or h.get("Path") or ""
         snippet = h.get("content") or h.get("snippet") or ""
-        classified.append({
-            "path": path,
-            "title": h.get("title") or h.get("heading") or "",
-            "heading": h.get("heading", ""),
-            "score_original": h.get("score", 0.0),
-            "score_ponderado": score_norm * weight,
-            "snippet": snippet,
-            "bucket": bucket,
-            "_score_norm": score_norm,
-        })
+        classified.append(_project_item(h, bucket, pregunta))
 
     metricas["buckets_descartados"] = buckets_descartados
     metricas["hits_sobre_umbral"] = len(classified)
@@ -482,8 +562,50 @@ def consultar_contexto(
         if b in buckets and len(buckets[b]) < caps[b]:
             buckets[b].append(h)
 
-    buckets_count = {k: len(v) for k, v in buckets.items() if v}
     top = classified[0] if classified else None
+    metricas["top_bucket"] = top["bucket"] if top else "none"
+    metricas["score_top_normalizado"] = top.get("_score_norm") if top else None
+
+    heuristicas = buckets["heuristicas"]
+    decisiones = buckets["decisiones"]
+    contradicciones = buckets["contradicciones"]
+    mocs_relevantes = buckets["mocs"]
+    obsoletas = buckets["obsoletas_o_baja_confianza"]
+
+    has_strong_curated = bool(heuristicas or decisiones or mocs_relevantes)
+    has_only_weak = (
+        not has_strong_curated
+        and not contradicciones
+        and len(obsoletas) <= 2
+    )
+
+    abstain_reason: str | None = None
+    if len(classified) == 0:
+        abstain_reason = "no_curated_hits"
+    elif not heuristicas and not decisiones and not mocs_relevantes and not contradicciones:
+        abstain_reason = "no_curated_hits"
+    elif obsoletas and not heuristicas and not decisiones and not mocs_relevantes and not contradicciones:
+        abstain_reason = "only_low_confidence"
+    elif top and top["bucket"] == "obsoletas_o_baja_confianza" and not has_strong_curated:
+        abstain_reason = "archive_only"
+    elif has_only_weak:
+        abstain_reason = "only_low_confidence"
+
+    if abstain_reason:
+        metricas["abstained"] = True
+        metricas["abstain_reason"] = abstain_reason
+        metricas["latencia_ms"] = int((time.perf_counter() - t0) * 1000)
+        return {
+            "summary": "sin contexto relevante en el vault",
+            "mocs_relevantes": [],
+            "heuristicas": [],
+            "decisiones": [],
+            "contradicciones": [],
+            "obsoletas_o_baja_confianza": [],
+            "metricas": metricas,
+        }
+
+    buckets_count = {k: len(v) for k, v in buckets.items() if v}
     summary = _build_summary(
         umbral=umbral_similitud,
         sobre_umbral=len(classified),
@@ -496,11 +618,11 @@ def consultar_contexto(
 
     return {
         "summary": summary,
-        "mocs_relevantes": buckets["mocs"],
-        "heuristicas": buckets["heuristicas"],
-        "decisiones": buckets["decisiones"],
-        "contradicciones": buckets["contradicciones"],
-        "obsoletas_o_baja_confianza": buckets["obsoletas_o_baja_confianza"],
+        "mocs_relevantes": mocs_relevantes,
+        "heuristicas": heuristicas,
+        "decisiones": decisiones,
+        "contradicciones": contradicciones,
+        "obsoletas_o_baja_confianza": obsoletas,
         "metricas": metricas,
     }
 
@@ -675,6 +797,80 @@ def _demo() -> None:
     assert abs(pool_copy[4]["_score_norm"] - 0.04 / 0.134) < 1e-9
     assert pool_copy[4]["_score_norm"] < 0.4  # confirmaría el bug viejo
     print("ok: classify + dedup + boost + double-serialize fix + notification handling + sse-shape real + subset normalization")
+
+    # v0.1.6 -- proyección de campos completos.
+    rich = {
+        "path": "Curator/heuristics/zigbee.md",
+        "title": "Topología del homelab (sanitizada)",
+        "score": 8.07,
+        "sections": [{"content": "RPi 5 + Home Assistant + Zigbee coordinator USB and MQTT bridge for tests. " * 4}],
+        "frontmatter": {"tags": ["heuristic", "infra", "architecture", "topology", "homelab"]},
+        "_score_norm": 1.0,
+    }
+    projected = _project_item(rich, "heuristicas", "Zigbee Home Assistant")
+    assert projected["titulo"] == "Topología del homelab (sanitizada)"
+    assert projected["score"] == 8.07
+    assert projected["snippet"]
+    assert len(projected["snippet"]) <= 180
+    assert projected["tags"] == ["heuristic", "infra", "architecture", "topology", "homelab"]
+
+    # Fallback de título: sin title -> basename del path.
+    untitled = {"path": "Curator/heuristics/2026-07-18-homelab-topologia.md", "score": 1.0, "_score_norm": 1.0}
+    projected_untitled = _project_item(untitled, "heuristicas", "Zigbee Home Assistant")
+    assert projected_untitled["titulo"] == "2026-07-18-homelab-topologia"
+
+    # MOC: porque heurístico.
+    moc = {
+        "path": "MOCs/SmartHome.md",
+        "title": "SmartHome MOC",
+        "score": 1.2,
+        "_score_norm": 1.0,
+    }
+    projected_moc = _project_item(moc, "mocs", "Zigbee Home Assistant")
+    assert projected_moc["porque"]
+
+    # Abstención por solo baja confianza.
+    obsoleta = _project_item(
+        {
+            "path": ".curator-archive/old.md",
+            "score": 0.2,
+            "_score_norm": 1.0,
+            "content": "status: obsolete",
+        },
+        "obsoletas_o_baja_confianza",
+        "receta tortilla patatas",
+    )
+    heuristicas = []
+    decisiones = []
+    contradicciones = []
+    mocs_relevantes = []
+    obsoletas = [obsoleta]
+    has_strong_curated = bool(heuristicas or decisiones or mocs_relevantes)
+    has_only_weak = not has_strong_curated and not contradicciones and len(obsoletas) <= 2
+    assert has_only_weak is True
+
+    # Caso feliz Zigbee: heurística + MOC sobreviven al umbral tras normalización local.
+    zigbee_pool = [
+        {"path": "Daily/2026-01-01.md", "score": 0.134},
+        {"path": "Curator/heuristics/2026-07-18-homelab-topologia.md", "score": 0.040, "title": "Topología del homelab (sanitizada)", "sections": [{"content": "RPi 5 + HA + Zigbee"}]},
+        {"path": "MOCs/SmartHome.md", "score": 0.030, "title": "SmartHome MOC"},
+    ]
+    zigbee_cat: list[dict[str, Any]] = []
+    for h in zigbee_pool:
+        b = classify(h["path"], h.get("content", ""))
+        if b is None:
+            continue
+        zigbee_cat.append({"_raw": h, "_bucket": b})
+    zigbee_subset = [c["_raw"] for c in zigbee_cat]
+    _maybe_normalize_scores(zigbee_subset)
+    filtered = []
+    for c in zigbee_cat:
+        h = c["_raw"]
+        if h["_score_norm"] >= 0.4:
+            filtered.append(_project_item(h, c["_bucket"], "Zigbee Home Assistant"))
+    assert any(i["bucket"] == "heuristicas" for i in filtered)
+    assert any(i["bucket"] == "mocs" for i in filtered)
+    print("ok: field projection + abstention + zigbee happy path")
 
 
 if __name__ == "__main__":
