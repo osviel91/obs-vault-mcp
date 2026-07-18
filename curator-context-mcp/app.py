@@ -30,7 +30,7 @@ mcp = FastMCP(
         "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
-    version="0.1.3",
+    version="0.1.4",
 )
 
 
@@ -126,7 +126,7 @@ def _parse_tool_text(result: dict[str, Any]) -> Any:
     sc = result.get("structuredContent")
     if isinstance(sc, dict) and "result" in sc:
         return sc["result"]
-    # Fallback: content[0].text puede venir doble-serializado.
+    # Some MCP servers wrap with the same key in content[0].text (doble-serializado).
     content = result.get("content") or []
     if not content:
         raise ContextError("reader returned empty content")
@@ -147,13 +147,17 @@ def _parse_tool_text(result: dict[str, Any]) -> Any:
 
 
 def _extract_hits(payload: Any) -> list[dict[str, Any]]:
-    # ponytail: el reader puede devolver lista, dict con 'results' o dict con 'hits'.
+    # ponytail: el reader puede devolver:
+    #   - lista nativa de hits (structuredContent.result)
+    #   - dict con key "result" (outputSchema del reader)
+    #   - dict con keys alternativas ("results", "hits", "items", "matches")
     if isinstance(payload, list):
         return [h for h in payload if isinstance(h, dict)]
     if isinstance(payload, dict):
-        for key in ("results", "hits", "items", "matches"):
-            if key in payload and isinstance(payload[key], list):
-                return [h for h in payload[key] if isinstance(h, dict)]
+        for key in ("result", "results", "hits", "items", "matches"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [h for h in value if isinstance(h, dict)]
     return []
 
 
@@ -303,7 +307,15 @@ def consultar_contexto(
         "hits_sobre_umbral": 0,
         "chunks_deduped": 0,
         "buckets_descartados": 0,
-        "reader_payload_keys": [],
+        # Telemetría de diagnóstico del response del reader. Si volvemos a
+        # ver hits_sobre_umbral=0 con total_hits>0, estas cuatro claves nos
+        # dicen exactamente qué shape devolvió el reader y si extrajimos algo.
+        "reader_payload_type": None,        # "list" | "dict" | None
+        "reader_payload_keys": [],          # si dict: keys; si list: []
+        "reader_sc_keys": [],               # keys de structuredContent, si hay
+        "reader_has_structured_content": False,
+        "hits_extraidos": 0,                # len(hits) tras _extract_hits
+        "hit_top_score_raw": None,          # score del top hit (raw reader), o None
         "latencia_ms": 0,
         "error": None,
         "error_index_not_ready": False,
@@ -349,12 +361,34 @@ def consultar_contexto(
                 "limit": SEARCH_POOL,
                 "mode": "hybrid",
             })
+            # Telemetría cruda del response: structuredContent + tipo/keys del payload.
+            sc = search_raw.get("structuredContent") if isinstance(search_raw, dict) else None
+            if isinstance(sc, dict):
+                metricas["reader_has_structured_content"] = True
+                metricas["reader_sc_keys"] = list(sc.keys())
             payload = _parse_tool_text(search_raw)
-            if isinstance(payload, dict) and not isinstance(payload.get("results"), list):
-                # Capturar keys para debug si el reader cambia el shape.
+            metricas["reader_payload_type"] = "list" if isinstance(payload, list) else (
+                "dict" if isinstance(payload, dict) else type(payload).__name__
+            )
+            if isinstance(payload, dict):
                 metricas["reader_payload_keys"] = list(payload.keys())
             hits = _extract_hits(payload)
+            metricas["hits_extraidos"] = len(hits)
             metricas["total_hits"] = len(hits)
+            if hits:
+                top_raw = hits[0].get("score")
+                if isinstance(top_raw, (int, float)):
+                    metricas["hit_top_score_raw"] = top_raw
+                else:
+                    metricas["hit_top_score_raw"] = repr(top_raw)
+            logger.debug(
+                " consultar_contexto: sc_keys=%s payload_type=%s payload_keys=%s hits=%d top_raw=%r",
+                metricas["reader_sc_keys"],
+                metricas["reader_payload_type"],
+                metricas["reader_payload_keys"],
+                len(hits),
+                metricas["hit_top_score_raw"],
+            )
         except (httpx.HTTPError, json.JSONDecodeError, ContextError) as exc:
             metricas["error"] = f"reader search failed: {exc}"
             metricas["error_index_not_ready"] = True
@@ -539,6 +573,42 @@ def _demo() -> None:
     else:
         raise AssertionError("expected ContextError for non-JSON body")
     print("ok: classify + dedup + boost + double-serialize fix + notification handling")
+
+    # Fixture del response SSE REAL observado en markdown-vault-mcp v3.4.2:
+    # el body es SSE, dentro tiene result.structuredContent.result (lista nativa)
+    # Y result.content[0].text es el mismo array pero doble-serializado.
+    real_hits = [
+        {"path": "Curator/heuristics/2026-07-18-homelab-topologia.md",
+         "title": "Topología del homelab (sanitizada)",
+         "folder": "Curator/heuristics", "score": 8.07, "content": "RPi 5 + HA ..."},
+    ]
+    sse_body = (
+        "event: message\n"
+        "data: "
+        + json.dumps({
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "content": [{"type": "text", "text": json.dumps(json.dumps(real_hits))}],
+                "structuredContent": {"result": real_hits},
+            },
+        })
+        + "\n\n"
+    )
+    parsed = _parse_response_body("text/event-stream", sse_body, expects_response=True)
+    assert isinstance(parsed, dict) and "result" in parsed
+    inner = parsed["result"]
+    assert isinstance(inner, dict) and "structuredContent" in inner
+    extracted = _parse_tool_text(inner)
+    assert extracted is real_hits or extracted == real_hits, extracted
+    # _extract_hits debe aceptar lista nativa y dict con key "result".
+    assert _extract_hits(real_hits) == real_hits
+    assert _extract_hits({"result": real_hits}) == real_hits
+    assert _extract_hits({"results": real_hits}) == real_hits
+    # Normalización sobre el score real 8.07: top debe quedar en 1.0.
+    h = list(real_hits)
+    _maybe_normalize_scores(h)
+    assert h[0]["_score_norm"] == 1.0
+    print("ok: classify + dedup + boost + double-serialize fix + notification handling + sse-shape real")
 
 
 if __name__ == "__main__":
