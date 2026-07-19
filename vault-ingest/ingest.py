@@ -15,11 +15,28 @@ from pathlib import Path
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("vault-ingest")
 
+
+def _env_int(name: str, default: int) -> int:
+    value = (os.getenv(name) or "").strip()
+    return int(value or str(default))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value == "true"
+
+
+def _env_str(name: str, default: str) -> str:
+    value = (os.getenv(name) or "").strip()
+    return value or default
+
 VAULT_ROOT = Path(os.getenv("VAULT_ROOT", "/vault")).resolve()
 INGEST_ROOT = VAULT_ROOT / ".ingest"
-INGEST_INTERVAL_SECONDS = int(os.getenv("INGEST_INTERVAL_SECONDS", "600"))
-OCR_PDFS = os.getenv("OCR_PDFS", "true").lower() == "true"
-OCR_LANGS = os.getenv("OCR_LANGS", "spa+eng")
+INGEST_INTERVAL_SECONDS = _env_int("INGEST_INTERVAL_SECONDS", 600)
+OCR_PDFS = _env_bool("OCR_PDFS", True)
+OCR_LANGS = _env_str("OCR_LANGS", "spa+eng")
 SUPPORTED_EXTENSIONS = {
     ".csv",
     ".doc",
