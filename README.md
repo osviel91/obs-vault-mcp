@@ -1,5 +1,7 @@
 # Obsidian Knowledge Infrastructure
 
+See `CHANGELOG.md` for feature and fix history.
+
 A Portainer-ready Docker Compose stack that:
 
 1. Lets Obsidian desktop/mobile clients edit the vault directly over WebDAV.
@@ -9,6 +11,7 @@ A Portainer-ready Docker Compose stack that:
 5. Exposes the knowledge base through a read-only MCP endpoint.
 6. Exposes a separate writer MCP that updates the source WebDAV vault safely for curator-style agents.
 7. Exposes a thin context MCP (`curator-context-mcp`) that turns one curator question into a curated context object by calling the read-only reader once.
+8. Adds a small observability stack for logs and basic host/container metrics.
 
 ## Architecture
 
@@ -36,6 +39,14 @@ Docker named volume: obsidian-knowledge-vault
             +--> curator-context-mcp (RAG-lite curated context)
                     |
                     +--> MCP: http://HOST:8021/mcp
+
+Grafana: http://HOST:3030
+    |
+    +--> Loki (container logs)
+    +--> Prometheus (metrics)
+            |
+            +--> cAdvisor (container metrics)
+            +--> node-exporter (host metrics)
 ```
 
 The NAS WebDAV vault is the source of truth and is shared directly with your Obsidian clients over WebDAV. The Docker volume is only a disposable local mirror for indexing and read/search MCP access. Curator-style writes go through a separate writer MCP so agents do not edit the disposable mirror.
@@ -51,6 +62,7 @@ Final access model:
 - Hermes document extraction for PDFs/docx/etc.: `vault-ingest`, which writes mirror-local Markdown shadow notes under `/.ingest` so the reader can index non-Markdown content too
 - Hermes curator writes: `vault-writer-mcp` on `8020`, backed by direct WebDAV access to the source vault
 - Hermes curated context (RAG-lite): `curator-context-mcp` on `8021`, a thin read-only post-processor that calls the reader over MCP-HTTP and buckets the hits (heuristics, decisions, contradictions, MOCs, obsoletas) so the Curator gets one curated context object per question
+- Observability UI: `grafana` on `3030`, backed by Loki for logs and Prometheus for metrics
 
 That split is intentional:
 
@@ -101,6 +113,18 @@ For PDFs, `vault-ingest` can run `ocrmypdf` first (`OCR_PDFS=true`) so scanned/i
 
 A thin read-only MCP service (`http://HOST:8021/mcp`) that exposes a single tool, `consultar_contexto`, intended as the Curator's first call when tackling a task. For a given question it issues one hybrid `search` against the reader, then classifies each hit by its path into logical buckets (`Curator/heuristics`, `Curator/decisions`, `Curator/contradictions`, `MOCs/...`, `.curator-archive/...`) and downweights weak sources into a separate `obsoletas_o_baja_confianza` bucket, applies a 2x score boost to heuristics and MOCs, dedupes per path, and returns a single dict with `summary`, `mocs_relevantes`, `heuristicas`, `decisiones`, `contradicciones`, `obsoletas_o_baja_confianza`, and `metricas`. It never invokes an LLM and never invents content; the `summary` field is a deterministic digest (hit counts + top path + bucket breakdown). `perfil_origen` is recorded only for traceability in `metricas`. It mounts no volumes: all vault access is via MCP-HTTP to `markdown-vault-mcp`.
 
+### `loki`, `alloy`, `prometheus`, `cadvisor`, `node-exporter`, `grafana`
+
+These services add the minimum useful observability layer for this stack:
+
+- `alloy` tails Docker container logs and ships them to `loki`
+- `grafana` provides the UI for querying logs and viewing dashboards
+- `prometheus` stores scraped metrics
+- `cadvisor` exports per-container CPU, memory, filesystem, and restart-adjacent metrics
+- `node-exporter` exports host CPU, memory, filesystem, and load metrics
+
+The setup is intentionally small: logs stay internal in Loki, metrics stay internal in Prometheus, and only the Grafana UI is published.
+
 ## Hermes Profiles
 
 - `hermes/knowledge-curator.md`: repo-local prompt/instructions for a Hermes curator profile that knows how to use both MCP services safely
@@ -115,6 +139,7 @@ Use that file as the source of truth for the Hermes `Knowledge Curator` system p
 - Network access from the Docker host to the NAS
 - Network access from Hermes to TCP port `8019` on this host
 - Network access from Hermes curator agents to TCP port `8020` on this host when write access is needed
+- Linux Docker host access suitable for read-only mounts used by `alloy`, `cadvisor`, and `node-exporter`
 
 ## Repository setup
 
@@ -221,6 +246,10 @@ Set it to the full Portainer stack webhook URL. Keep it in GitHub Secrets, not i
 | `CURATOR_ALLOW_HARD_DELETE` | `false` |
 | `PUID` | `1000` |
 | `PGID` | `1000` |
+| `GRAFANA_ADMIN_USER` | `admin` |
+| `GRAFANA_ADMIN_PASSWORD` | `change-me` |
+| `GRAFANA_PORT` | `3030` |
+| `LOKI_RETENTION_PERIOD` | `168h` |
 
 ## Verify synchronization
 
@@ -409,21 +438,80 @@ docker restart obsidian-vault-sync
 
 Restarting begins the loop with an immediate sync.
 
+## Monitoring
+
+After deploy, Grafana is available at:
+
+```text
+http://DOCKER_HOST_IP:3030
+```
+
+Login with:
+
+- `GRAFANA_ADMIN_USER`
+- `GRAFANA_ADMIN_PASSWORD`
+
+The stack auto-provisions two data sources:
+
+- `Loki` for container logs
+- `Prometheus` for host and container metrics
+
+Suggested first checks in Grafana Explore:
+
+- Loki query for sync issues:
+
+```text
+{compose_service="vault-sync"}
+```
+
+- Loki query for writer activity:
+
+```text
+{compose_service="vault-writer-mcp"}
+```
+
+- Loki query for ingest/OCR activity:
+
+```text
+{compose_service="vault-ingest"}
+```
+
+- Prometheus metric targets to inspect:
+
+```text
+up{job=~"cadvisor|node-exporter|alloy|prometheus"}
+```
+
+Useful things to watch first:
+
+- repeated `vault-sync` failures
+- `copyto failed` or `deletefile failed` in writer-triggered syncs
+- OCR/indexing spikes that correlate with CPU or memory pressure
+- container restarts for `markdown-vault-mcp`, `vault-writer-mcp`, and `curator-context-mcp`
+
 ## Updating the infrastructure
 
 Update `compose.yaml` in GitHub, then use Portainer's Git stack update/redeploy function. You may also enable Portainer GitOps updates according to your Portainer edition and configuration.
 
 ## Persistence
 
-Two named volumes are created:
+Five named volumes are created:
 
 ```text
 obsidian-knowledge-vault
 obsidian-knowledge-mcp-state
+obsidian-knowledge-sync-control
+obsidian-knowledge-loki
+obsidian-knowledge-prometheus
+obsidian-knowledge-grafana
 ```
 
 - `obsidian-knowledge-vault`: local mirror of the NAS vault
 - `obsidian-knowledge-mcp-state`: SQLite index, vectors, and cache
+- `obsidian-knowledge-sync-control`: sync trigger handoff between writer and sync containers
+- `obsidian-knowledge-loki`: Loki log storage
+- `obsidian-knowledge-prometheus`: Prometheus metrics storage
+- `obsidian-knowledge-grafana`: Grafana state and dashboards
 
 Deleting the MCP state volume is safe but forces a complete reindex. Deleting the vault mirror is also recoverable from WebDAV, but the next initial sync will be required.
 
@@ -433,8 +521,10 @@ Deleting the MCP state volume is safe but forces a complete reindex. Deleting th
 - Never commit WebDAV credentials.
 - Do not publish port `8019` directly to the Internet.
 - Do not publish port `8020` directly to the Internet.
+- Do not publish port `3030` directly to the Internet without authentication and transport protection.
 - Prefer Tailscale, WireGuard, or a protected reverse proxy for remote access.
 - Keep the reader MCP on `8019` in read-only mode. Treat the writer MCP on `8020` as a privileged curator path.
+- Change the default Grafana admin password before exposing the UI beyond a trusted LAN or VPN.
 - Give the NAS WebDAV account access only to the vault directory.
 - Back up the NAS vault independently; synchronization is not a backup.
 
