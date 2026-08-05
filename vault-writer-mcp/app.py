@@ -213,6 +213,11 @@ def _asset_folder_for_note(path: str) -> str:
     return f"{parent}/{folder_name}"
 
 
+def _note_folder(path: str) -> str:
+    parent = PurePosixPath(path).parent.as_posix()
+    return "" if parent in ("", ".") else parent
+
+
 def _list_file_paths(path: str, metadata: dict[str, Any] | None = None) -> list[str]:
     metadata = metadata or _path_metadata(path)
     if not metadata.get("IsDir"):
@@ -225,6 +230,108 @@ def _list_file_paths(path: str, metadata: dict[str, Any] | None = None) -> list[
         if item_path:
             files.append(posixpath.normpath(f"{path}/{item_path}"))
     return files
+
+
+def _resolve_note_reference(note_path: str, reference: str) -> str:
+    clean = reference.strip()
+    if not clean:
+        raise WriterError("empty asset reference")
+    if clean.startswith("/"):
+        return _normalize_vault_path(clean.lstrip("/"))
+    note_folder = _note_folder(note_path)
+    joined = posixpath.join(note_folder, clean) if note_folder else clean
+    return _normalize_vault_path(joined)
+
+
+def _relative_from_note(note_path: str, target_path: str) -> str:
+    note_folder = _note_folder(note_path)
+    if not note_folder:
+        return target_path
+    return posixpath.relpath(target_path, note_folder)
+
+
+def _is_external_reference(reference: str) -> bool:
+    lowered = reference.strip().lower()
+    return lowered.startswith(("http://", "https://", "data:", "mailto:", "ftp://"))
+
+
+def _split_wikilink_target(target: str) -> tuple[str, str]:
+    pipe_index = target.find("|")
+    suffix = ""
+    if pipe_index != -1:
+        suffix = target[pipe_index:]
+        target = target[:pipe_index]
+    hash_index = target.find("#")
+    if hash_index != -1:
+        suffix = target[hash_index:] + suffix
+        target = target[:hash_index]
+    return target, suffix
+
+
+def _split_markdown_target(target: str) -> tuple[str, str]:
+    stripped = target.strip()
+    if stripped.startswith("<"):
+        closing = stripped.find(">")
+        if closing != -1:
+            return stripped[1:closing], stripped[closing + 1 :]
+    match = re.match(r"([^\s)]+)(.*)", stripped)
+    if not match:
+        return stripped, ""
+    return match.group(1), match.group(2)
+
+
+def _rewrite_markdown_target(path_part: str, suffix: str) -> str:
+    if suffix:
+        return f"{path_part}{suffix}"
+    return path_part
+
+
+def _organize_referenced_assets(note_path: str, content: str) -> tuple[str, list[dict[str, str]]]:
+    asset_folder = _asset_folder_for_note(note_path)
+    planned_moves: dict[str, str] = {}
+    moved_assets: list[dict[str, str]] = []
+
+    def plan_asset(reference: str) -> str:
+        if not reference or reference.startswith("#") or _is_external_reference(reference):
+            return reference
+        resolved = _resolve_note_reference(note_path, reference)
+        metadata = _lsjson_stat(resolved)
+        if metadata is None or metadata.get("IsDir"):
+            return reference
+        if resolved.endswith(".md"):
+            return reference
+        if _asset_owner_folder(resolved) == PurePosixPath(asset_folder).name:
+            return _relative_from_note(note_path, resolved)
+        target = posixpath.join(asset_folder, PurePosixPath(resolved).name)
+        previous = planned_moves.get(resolved)
+        if previous is None:
+            for source_path, target_path in planned_moves.items():
+                if target_path == target and source_path != resolved:
+                    raise WriterError(f"asset name collision while organizing note assets: {target}")
+            planned_moves[resolved] = target
+            moved_assets.append({"from_path": resolved, "to_path": target})
+        return _relative_from_note(note_path, planned_moves[resolved])
+
+    wikilink_re = re.compile(r"(!?\[\[)([^\]]+)(\]\])")
+    markdown_re = re.compile(r"(!?\[[^\]]*\]\()([^\)]+)(\))")
+
+    def replace_wikilink(match: re.Match[str]) -> str:
+        target, suffix = _split_wikilink_target(match.group(2))
+        rewritten = plan_asset(target)
+        if rewritten == target:
+            return match.group(0)
+        return f"{match.group(1)}{rewritten}{suffix}{match.group(3)}"
+
+    def replace_markdown(match: re.Match[str]) -> str:
+        target, suffix = _split_markdown_target(match.group(2))
+        rewritten = plan_asset(target)
+        if rewritten == target:
+            return match.group(0)
+        return f"{match.group(1)}{_rewrite_markdown_target(rewritten, suffix)}{match.group(3)}"
+
+    updated = wikilink_re.sub(replace_wikilink, content)
+    updated = markdown_re.sub(replace_markdown, updated)
+    return updated, moved_assets
 
 
 def _record_move_for_sync(source: str, target: str, metadata: dict[str, Any] | None = None) -> None:
@@ -326,6 +433,20 @@ def _write_text(path: str, content: str) -> dict[str, Any]:
     }
     _record_changed_path("write", path)
     result.update(_request_sync_result())
+    return result
+
+
+def _write_text_without_sync(path: str, content: str) -> dict[str, Any]:
+    _ensure_parent_folder(path)
+    _rclone(["rcat", _join_remote(path)], stdin_text=content)
+    state = _read_note_state(path)
+    result = {
+        "path": path,
+        "sha256": state.sha256,
+        "size_bytes": state.size_bytes,
+        "modified_at": state.modified_at,
+    }
+    _record_changed_path("write", path)
     return result
 
 
@@ -518,6 +639,39 @@ def append_links(
 
 
 @mcp.tool
+def organize_note_assets(path: str, expected_sha256: str | None = None) -> dict[str, Any]:
+    """Move referenced local assets into NoteName_assets/ and rewrite the note links."""
+    normalized = _normalize_note_path(path)
+    current = _assert_expected(normalized, expected_sha256)
+    if current is None:
+        raise WriterError(f"note not found: {normalized}")
+
+    updated_content, planned_assets = _organize_referenced_assets(normalized, current.content)
+    if not planned_assets:
+        return {
+            "path": normalized,
+            "sha256": current.sha256,
+            "size_bytes": current.size_bytes,
+            "modified_at": current.modified_at,
+            "assets_moved": [],
+            "rewritten": False,
+        }
+
+    for asset in planned_assets:
+        source = asset["from_path"]
+        target = asset["to_path"]
+        metadata = _path_metadata(source)
+        _record_move_for_sync(source, target, metadata)
+        _move_path(source, target)
+
+    result = _write_text_without_sync(normalized, updated_content)
+    result["assets_moved"] = planned_assets
+    result["rewritten"] = updated_content != current.content
+    result.update(_request_sync_result())
+    return result
+
+
+@mcp.tool
 def move_note(from_path: str, to_path: str, expected_sha256: str | None = None) -> dict[str, Any]:
     """Move or rename a note inside the vault."""
     source = _normalize_note_path(from_path)
@@ -676,6 +830,31 @@ def selfcheck() -> None:
         pass
     else:
         raise AssertionError("asset move across owners should be rejected")
+
+    original_lsjson_stat = globals()["_lsjson_stat"]
+
+    def fake_lsjson_stat(path: str) -> dict[str, Any] | None:
+        known = {
+            "Notes/images/pic.png": {"IsDir": False, "Size": 1, "ModTime": "now"},
+            "Notes/docs/file.pdf": {"IsDir": False, "Size": 1, "ModTime": "now"},
+            "Notes/Other.md": {"IsDir": False, "Size": 1, "ModTime": "now"},
+        }
+        return known.get(path)
+
+    globals()["_lsjson_stat"] = fake_lsjson_stat
+    try:
+        rewritten, moved = _organize_referenced_assets(
+            "Notes/Project.md",
+            "![img](images/pic.png)\n![[docs/file.pdf|PDF]]\n[[Other.md]]\n",
+        )
+    finally:
+        globals()["_lsjson_stat"] = original_lsjson_stat
+
+    assert rewritten == "![img](Project_assets/pic.png)\n![[Project_assets/file.pdf|PDF]]\n[[Other.md]]\n"
+    assert sorted(moved, key=lambda item: item["from_path"]) == [
+        {"from_path": "Notes/docs/file.pdf", "to_path": "Notes/Project_assets/file.pdf"},
+        {"from_path": "Notes/images/pic.png", "to_path": "Notes/Project_assets/pic.png"},
+    ]
 
     print("selfcheck ok")
 

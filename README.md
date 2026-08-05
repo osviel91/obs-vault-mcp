@@ -378,6 +378,7 @@ The writer MCP currently exposes note-focused tools for safe curation work:
 - `move_note`
 - `archive_note`
 - `delete_note`
+- `organize_note_assets`
 - `move_asset`
 - `archive_asset`
 - `delete_asset`
@@ -391,6 +392,7 @@ Safety model:
 - note paths are always relative to the vault root
 - `read_note` returns a `sha256` token; pass it back as `expected_sha256` on edits to avoid overwriting concurrent changes
 - asset lifecycle tools operate only on files or folders inside `NoteName_assets/`
+- `organize_note_assets` rewrites explicit local asset links in a note and moves those files into its sibling `NoteName_assets/` folder
 - direct asset moves must stay within the same `NoteName_assets/` owner
 - moving, archiving, or deleting a note also carries its sibling `NoteName_assets/` folder when present
 - `delete_note` archives by default instead of hard-deleting

@@ -13,6 +13,7 @@ Update `## Unreleased` on meaningful changes:
 - `vault-ingest` service for extracting non-Markdown vault documents into mirror-local Markdown shadow notes for indexing.
 - Small observability stack with Grafana, Loki, Prometheus, cAdvisor, node-exporter, and Alloy for logs and basic host/container metrics.
 - Asset lifecycle tools in `vault-writer-mcp` for moving, archiving, and deleting files stored under `NoteName_assets/`.
+- `organize_note_assets` in `vault-writer-mcp` to move referenced local assets into `NoteName_assets/` and rewrite the note links.
 
 ### Fixed
 - `curator-context-mcp` response parsing for real `markdown-vault-mcp` payloads, including double-serialized results, SSE handling, empty notification responses, hit extraction, score normalization, bucket filtering, and abstention on weak or non-curated matches.
