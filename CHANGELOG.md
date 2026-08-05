@@ -1,5 +1,11 @@
 # Changelog
 
+Update `## Unreleased` on meaningful changes:
+- `Added`: new user-visible features or services
+- `Fixed`: behavior corrections, reliability fixes, or regressions
+- `Docs`: README, profile, or operational guidance changes
+- `Chore`: repo maintenance, tooling, or internal ops work with no behavior change
+
 ## Unreleased
 
 ### Added
