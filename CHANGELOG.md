@@ -11,7 +11,6 @@ Update `## Unreleased` on meaningful changes:
 ### Added
 - `curator-context-mcp` read-only MCP service on `8021` that turns one curator question into a deterministic curated context object from a single reader search.
 - `vault-ingest` service for extracting non-Markdown vault documents into mirror-local Markdown shadow notes for indexing.
-- Small observability stack with Grafana, Loki, Prometheus, cAdvisor, node-exporter, and Alloy for logs and basic host/container metrics.
 - Asset lifecycle tools in `vault-writer-mcp` for moving, archiving, and deleting files stored under `NoteName_assets/`.
 - `organize_note_assets` in `vault-writer-mcp` to move referenced local assets into `NoteName_assets/` and rewrite the note links.
 
