@@ -91,7 +91,7 @@ The filesystem watcher is intentionally disabled (`MARKDOWN_VAULT_MCP_FILE_WATCH
 
 ### `vault-writer-mcp`
 
-Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, and archive redundancies without writing into the disposable mirror. It also exposes separate asset lifecycle tools for files stored under the `NoteName_assets/` convention.
+Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, archive redundancies, and structurally manage non-Markdown files without writing into the disposable mirror. It also exposes separate asset lifecycle tools for files stored under the `NoteName_assets/` convention.
 
 ### `vault-ingest`
 
@@ -355,6 +355,9 @@ The writer MCP currently exposes note-focused tools for safe curation work:
 - `move_asset`
 - `archive_asset`
 - `delete_asset`
+- `move_file`
+- `archive_file`
+- `delete_file`
 - `list_folder`
 - `stat_path`
 - `request_sync`
@@ -365,11 +368,13 @@ Safety model:
 - note paths are always relative to the vault root
 - `read_note` returns a `sha256` token; pass it back as `expected_sha256` on edits to avoid overwriting concurrent changes
 - asset lifecycle tools operate only on files or folders inside `NoteName_assets/`
+- generic file lifecycle tools operate on non-Markdown files anywhere else in the vault and reject internal stack paths like `/.ingest`, `/.markdown_vault_mcp`, `.obsidian`, `.trash`, `.git`, and `.webdav-sync-ready`
 - `organize_note_assets` rewrites explicit local asset links in a note and moves those files into its sibling `NoteName_assets/` folder
 - direct asset moves must stay within the same `NoteName_assets/` owner
 - moving, archiving, or deleting a note also carries its sibling `NoteName_assets/` folder when present
 - `delete_note` archives by default instead of hard-deleting
 - `delete_asset` archives by default instead of hard-deleting
+- `delete_file` archives by default instead of hard-deleting
 - hard delete stays disabled unless `CURATOR_ALLOW_HARD_DELETE=true`
 - successful write, move, archive, and delete operations also request an immediate mirror sync
 - `request_sync` is the only MCP way to force the mirror to refresh without performing a writer mutation (useful after a human edits the vault directly through NAS WebDAV)

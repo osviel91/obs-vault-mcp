@@ -30,6 +30,8 @@ ALLOW_HARD_DELETE = os.getenv("CURATOR_ALLOW_HARD_DELETE", "false").lower() == "
 SYNC_REQUEST_FILE = os.getenv("SYNC_REQUEST_FILE", "/control/request-sync")
 CHANGED_PATHS_FILE = os.getenv("CHANGED_PATHS_FILE", "/control/changed-paths.log")
 ASSET_FOLDER_SUFFIX = "_assets"
+PROTECTED_TOP_LEVEL_DIRS = {".git", ".ingest", ".markdown_vault_mcp", ".obsidian", ".trash"}
+PROTECTED_PATHS = {".webdav-sync-ready"}
 
 mcp = FastMCP(
     "vault-writer-mcp",
@@ -128,6 +130,24 @@ def _normalize_asset_path(path: str) -> str:
     normalized = _normalize_vault_path(path)
     if _asset_owner_folder(normalized) is None:
         raise WriterError("asset paths must live under a NoteName_assets folder")
+    return normalized
+
+
+def _is_protected_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if not parts:
+        return False
+    if parts[0] in PROTECTED_TOP_LEVEL_DIRS:
+        return True
+    return path in PROTECTED_PATHS
+
+
+def _normalize_file_path(path: str) -> str:
+    normalized = _normalize_vault_path(path)
+    if normalized.endswith(".md"):
+        raise WriterError("use note tools for .md notes")
+    if _is_protected_path(normalized):
+        raise WriterError("path points to an internal vault location managed by the stack")
     return normalized
 
 
@@ -717,6 +737,25 @@ def move_asset(from_path: str, to_path: str) -> dict[str, Any]:
 
 
 @mcp.tool
+def move_file(from_path: str, to_path: str) -> dict[str, Any]:
+    """Move or rename a non-Markdown file anywhere in the vault except internal stack paths."""
+    source = _normalize_file_path(from_path)
+    target = _normalize_file_path(to_path)
+    metadata = _path_metadata(source)
+    if metadata.get("IsDir"):
+        raise WriterError("move_file only supports files; use a file path, not a folder")
+    _record_move_for_sync(source, target, metadata)
+    _move_path(source, target)
+    result = {
+        "from_path": source,
+        "to_path": target,
+    }
+    result.update(_result_from_metadata(target, _path_metadata(target)))
+    result.update(_request_sync_result())
+    return result
+
+
+@mcp.tool
 def archive_note(path: str, expected_sha256: str | None = None) -> dict[str, Any]:
     """Archive a note by moving it under the curator archive root with a timestamped prefix."""
     normalized = _normalize_note_path(path)
@@ -750,6 +789,25 @@ def archive_asset(path: str) -> dict[str, Any]:
     archive_path = _normalize_asset_path(_archive_destination(normalized))
     _require_same_asset_owner(normalized, archive_path)
     metadata = _path_metadata(normalized)
+    _record_move_for_sync(normalized, archive_path, metadata)
+    _move_path(normalized, archive_path)
+    result = {
+        "from_path": normalized,
+        "archive_path": archive_path,
+    }
+    result.update(_result_from_metadata(archive_path, _path_metadata(archive_path)))
+    result.update(_request_sync_result())
+    return result
+
+
+@mcp.tool
+def archive_file(path: str) -> dict[str, Any]:
+    """Archive a non-Markdown file under the curator archive root."""
+    normalized = _normalize_file_path(path)
+    metadata = _path_metadata(normalized)
+    if metadata.get("IsDir"):
+        raise WriterError("archive_file only supports files; use a file path, not a folder")
+    archive_path = _normalize_file_path(_archive_destination(normalized))
     _record_move_for_sync(normalized, archive_path, metadata)
     _move_path(normalized, archive_path)
     result = {
@@ -803,9 +861,30 @@ def delete_asset(path: str, hard_delete: bool = False) -> dict[str, Any]:
     return result
 
 
+@mcp.tool
+def delete_file(path: str, hard_delete: bool = False) -> dict[str, Any]:
+    """Delete a non-Markdown file. By default it archives instead of hard-deleting."""
+    normalized = _normalize_file_path(path)
+    metadata = _path_metadata(normalized)
+    if metadata.get("IsDir"):
+        raise WriterError("delete_file only supports files; use a file path, not a folder")
+    if not hard_delete:
+        archived = archive_file(normalized)
+        archived["mode"] = "archived"
+        return archived
+    if not ALLOW_HARD_DELETE:
+        raise WriterError("hard_delete is disabled by CURATOR_ALLOW_HARD_DELETE=false")
+    _record_delete_for_sync(normalized, metadata)
+    _delete_path(normalized, metadata)
+    result = {"path": normalized, "mode": "hard_deleted"}
+    result.update(_request_sync_result())
+    return result
+
+
 def selfcheck() -> None:
     assert _normalize_note_path("Notes/Project.md") == "Notes/Project.md"
     assert _normalize_asset_path("Notes/Project_assets/image.png") == "Notes/Project_assets/image.png"
+    assert _normalize_file_path("Docs/file.pdf") == "Docs/file.pdf"
     assert _asset_folder_for_note("Notes/Project.md") == "Notes/Project_assets"
 
     try:
@@ -821,6 +900,20 @@ def selfcheck() -> None:
         pass
     else:
         raise AssertionError("asset path outside NoteName_assets should be rejected")
+
+    try:
+        _normalize_file_path("Notes/Project.md")
+    except WriterError:
+        pass
+    else:
+        raise AssertionError("markdown path should not pass generic file validation")
+
+    try:
+        _normalize_file_path(".ingest/Docs/file.pdf.md")
+    except WriterError:
+        pass
+    else:
+        raise AssertionError("internal stack paths should be rejected")
 
     _require_same_asset_owner("Notes/Project_assets/image.png", "Archive/Project_assets/image.png")
 
