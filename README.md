@@ -49,10 +49,10 @@ This project exists to give Hermes full knowledge access without making Hermes m
 Final access model:
 
 - Obsidian clients on desktop/mobile: direct WebDAV read/write to the NAS vault
-- Hermes read/search/analysis: `markdown-vault-mcp` on `8019`, backed by the mirrored local volume
+- Hermes direct read/search/analysis: `markdown-vault-mcp` on `8019`, backed by the mirrored local volume
 - Hermes document extraction for PDFs/docx/etc.: `vault-ingest`, which writes mirror-local Markdown shadow notes under `/.ingest` so the reader can index non-Markdown content too
 - Hermes curator writes: `vault-writer-mcp` on `8020`, backed by direct WebDAV access to the source vault
-- Hermes curated context (RAG-lite): `curator-context-mcp` on `8021`, a thin read-only post-processor that calls the reader over MCP-HTTP and buckets the hits (heuristics, decisions, contradictions, MOCs, obsoletas) so the Curator gets one curated context object per question
+- Hermes curated context (RAG-lite, recommended first step for knowledge questions): `curator-context-mcp` on `8021`, a thin read-only post-processor that calls the reader over MCP-HTTP and buckets the hits (heuristics, decisions, contradictions, MOCs, obsolete/low-confidence material) so the Curator gets one curated context object per question
 
 That split is intentional:
 
@@ -85,13 +85,13 @@ When a writer request is detected, `vault-sync` first processes `changed-paths.l
 
 ### `markdown-vault-mcp`
 
-Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is configured in application-level read-only mode.
+Indexes the Markdown vault and exposes it using Streamable HTTP MCP. It is configured in application-level read-only mode and is the general-purpose reader MCP for direct vault inspection. See `MCP Endpoints And Tools` below for the recommended query flow and tool categories.
 
 The filesystem watcher is intentionally disabled (`MARKDOWN_VAULT_MCP_FILE_WATCHER=false`). The local mirror is populated by `vault-sync` from another container, and inotify does not see cross-container writes. Index convergence is handled by the boot-time reconciliation pass plus explicit `reindex` / `build_embeddings` calls from MCP.
 
 ### `vault-writer-mcp`
 
-Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is intended for curator agents that need to update frontmatter, add links, move notes, archive redundancies, and structurally manage non-Markdown files without writing into the disposable mirror. It also exposes separate asset lifecycle tools for files stored under the `NoteName_assets/` convention.
+Writes Markdown notes directly to the source WebDAV vault through `rclone` commands backed by the same WebDAV credentials. It is the safe write path for curator agents and never writes into the disposable mirror. See `MCP Endpoints And Tools` below for the write tool groups and safety rules.
 
 ### `vault-ingest`
 
@@ -101,7 +101,7 @@ For PDFs, `vault-ingest` can run `ocrmypdf` first (`OCR_PDFS=true`) so scanned/i
 
 ### `curator-context-mcp`
 
-A thin read-only MCP service (`http://HOST:8021/mcp`) that exposes a single tool, `consultar_contexto`, intended as the Curator's first call when tackling a task. For a given question it issues one hybrid `search` against the reader, then classifies each hit by its path into logical buckets (`Curator/heuristics`, `Curator/decisions`, `Curator/contradictions`, `MOCs/...`, `.curator-archive/...`) and downweights weak sources into a separate `obsoletas_o_baja_confianza` bucket, applies a 2x score boost to heuristics and MOCs, dedupes per path, and returns a single dict with `summary`, `mocs_relevantes`, `heuristicas`, `decisiones`, `contradicciones`, `obsoletas_o_baja_confianza`, and `metricas`. It never invokes an LLM and never invents content; the `summary` field is a deterministic digest (hit counts + top path + bucket breakdown). `perfil_origen` is recorded only for traceability in `metricas`. It mounts no volumes: all vault access is via MCP-HTTP to `markdown-vault-mcp`.
+A thin read-only MCP service (`http://HOST:8021/mcp`) that exposes a single tool, `consultar_contexto`. It is the recommended first MCP for knowledge questions: it performs one hybrid search against the reader, classifies the results into curator-friendly buckets, and returns a deterministic context object without using an LLM. It mounts no volumes: all vault access is via MCP-HTTP to `markdown-vault-mcp`. See `MCP Endpoints And Tools` below for the exact behavior and response fields.
 
 ## Hermes Profiles
 
@@ -117,6 +117,7 @@ Use that file as the source of truth for the Hermes `Knowledge Curator` system p
 - Network access from the Docker host to the NAS
 - Network access from Hermes to TCP port `8019` on this host
 - Network access from Hermes curator agents to TCP port `8020` on this host when write access is needed
+- Network access from Hermes curator agents to TCP port `8021` on this host for curated context queries
 
 ## Repository setup
 
@@ -334,58 +335,138 @@ Recommended role split inside Hermes:
 - `vault-writer-mcp`: write, move, archive, frontmatter updates, link insertion
 - `curator-context-mcp`: one-shot curated context per question (`consultar_contexto`)
 
-## Curator Writer MCP
+## MCP Endpoints And Tools
 
-Use the two MCP endpoints for different jobs:
+This stack exposes three MCP servers with intentionally different responsibilities. Keeping that split clear is the easiest way to avoid accidental writes to the disposable mirror or unnecessary direct reads from WebDAV.
+
+| MCP | Endpoint | Purpose | Writes to source vault |
+|---|---|---|---|
+| `markdown-vault-mcp` | `http://DOCKER_HOST_IP:8019/mcp` | Indexed read/search interface over the mirrored vault | No |
+| `vault-writer-mcp` | `http://DOCKER_HOST_IP:8020/mcp` | Safe curator write interface over WebDAV | Yes |
+| `curator-context-mcp` | `http://DOCKER_HOST_IP:8021/mcp` | Deterministic curated context per question | No |
+
+### Which MCP Should I Use To Query Knowledge?
+
+Use `curator-context-mcp` first when the goal is to ask, "What do we know about X?" It is the recommended entry point for knowledge queries because it turns one question into a curated context object instead of returning a flat list of raw matches.
+
+Use `markdown-vault-mcp` after that when you need to inspect the vault directly: run broader searches, read full notes or sections, inspect backlinks, check similar notes, or validate the source material behind the curated context.
+
+Do not use `vault-writer-mcp` as the primary knowledge-query interface. Its job is safe mutation of the source vault. The main exception is reading a note with `read_note` immediately before editing it so you can obtain the current `sha256` for optimistic concurrency.
+
+Recommended query flow:
+
+```text
+User question
+    -> curator-context-mcp / consultar_contexto
+    -> if more detail is needed: markdown-vault-mcp / search, read, get_backlinks, get_similar
+    -> if a change is approved: vault-writer-mcp
+```
+
+### `markdown-vault-mcp` (`8019`)
+
+This is the main reader MCP. In this stack it runs with `MARKDOWN_VAULT_MCP_READ_ONLY=true`, so upstream write tools stay hidden and only the read/search/index-management surface is exposed. Think of it as the raw vault interface: powerful and general-purpose, but not opinionated about which notes matter most for a curator question.
+
+What it is for:
+
+- searching the mirrored vault by keywords, semantics, or hybrid ranking
+- reading full notes or specific sections
+- exploring links, backlinks, similar notes, recent notes, and orphan notes
+- checking whether the index and embeddings are ready
+- forcing reindexing after mirror changes because the file watcher is intentionally disabled in this deployment
+
+Key tools normally available in this deployment:
+
+- Discovery and reading: `search`, `read`, `list_documents`, `list_folders`, `list_tags`, `stats`
+- Link graph and navigation: `get_backlinks`, `get_outlinks`, `get_broken_links`, `get_similar`, `get_toc`, `get_recent`, `get_context`, `get_orphan_notes`, `get_most_linked`, `get_connection_path`
+- Index and embeddings: `reindex`, `build_embeddings`, `get_index_status`, `embeddings_status`
+
+Operational notes:
+
+- It reads from the local mirror volume, not from WebDAV directly.
+- Because `MARKDOWN_VAULT_MCP_FILE_WATCHER=false`, external changes only become queryable after the mirror is refreshed and the reader is reindexed.
+- If a curator agent needs to modify anything, it must switch to `vault-writer-mcp` instead of trying to write here.
+
+### `vault-writer-mcp` (`8020`)
+
+This MCP is the write path for curator-style agents. It talks directly to the source WebDAV vault through `rclone`, so successful changes land in the real vault first and then request a faster mirror refresh.
+
+What it is for:
+
+- reading a target Markdown note before editing it
+- updating note content or YAML frontmatter safely
+- appending semantic links without duplicating them
+- moving, archiving, or deleting notes while carrying sibling `NoteName_assets/` folders with them
+- managing local note assets and other non-Markdown files without touching internal stack paths
+- requesting an on-demand mirror refresh when a human changed the vault directly through WebDAV
+
+Tools exposed by this MCP:
+
+- Inspection: `read_note`, `stat_path`, `list_folder`
+- Markdown note editing: `write_note`, `upsert_frontmatter`, `append_links`
+- Note structure changes: `move_note`, `archive_note`, `delete_note`
+- Note asset management (`NoteName_assets/` only): `organize_note_assets`, `move_asset`, `archive_asset`, `delete_asset`
+- Generic non-Markdown file management: `move_file`, `archive_file`, `delete_file`
+- Sync trigger: `request_sync`
+
+Safety model:
+
+- Content-editing tools only work on `.md` notes.
+- `read_note` returns a `sha256`; pass it back as `expected_sha256` when editing to avoid overwriting concurrent changes.
+- Asset lifecycle tools are limited to paths inside a single `NoteName_assets/` owner folder.
+- Generic file lifecycle tools reject internal stack paths like `/.ingest`, `/.markdown_vault_mcp`, `.obsidian`, `.trash`, `.git`, and `.webdav-sync-ready`.
+- `delete_note`, `delete_asset`, and `delete_file` archive by default; hard delete stays disabled unless `CURATOR_ALLOW_HARD_DELETE=true`.
+- Successful write, move, archive, and delete operations also drop a sync request so `vault-sync` refreshes the mirror quickly.
+
+### `curator-context-mcp` (`8021`)
+
+This MCP is intentionally narrow: it exposes a single tool, `consultar_contexto`, as a deterministic first-pass context builder for curator work. This is the recommended MCP to use first when the user is asking for knowledge, prior decisions, heuristics, contradictions, or relevant MOCs about a topic.
+
+What it is for:
+
+- taking one curator question and turning it into a structured context object
+- prioritizing heuristics and MOCs over weaker matches
+- separating decisions, contradictions, and obsolete or low-confidence material before the curator reads full notes
+- giving the curator an honest "not enough context" style answer instead of inventing content
+
+Tool exposed by this MCP:
+
+- `consultar_contexto(question, perfil_origen="", max_heuristicas=5, max_contradicciones=3, umbral_similitud=0.6)`
+
+What `consultar_contexto` returns:
+
+The field names below are the literal response keys returned by the MCP:
+
+- `summary`
+- `mocs_relevantes`
+- `heuristicas`
+- `decisiones`
+- `contradicciones`
+- `obsoletas_o_baja_confianza`
+- `metricas`
+
+Behavior notes:
+
+- It makes exactly one hybrid `search` call against `markdown-vault-mcp` and then post-processes the hits.
+- It classifies by path conventions such as `Curator/heuristics`, `Curator/decisions`, `Curator/contradictions`, `MOCs/...`, and `.curator-archive/...`.
+- It discards inbox-style material like `Curator/inbox/**` and never invents summaries with an LLM.
+- It boosts heuristics and MOCs, relegates obsolete or low-confidence snippets to a weaker bucket, dedupes by path, and reports traceability data in `metricas`.
+
+## Curator Workflow By MCP
+
+Use the three MCP endpoints for different jobs:
 
 - `http://DOCKER_HOST_IP:8019/mcp`: read/search/index endpoint backed by the local mirror
 - `http://DOCKER_HOST_IP:8020/mcp`: write endpoint backed by direct WebDAV access
 - `http://DOCKER_HOST_IP:8021/mcp`: curated context endpoint (`consultar_contexto`) backed by MCP-HTTP to the reader
 
-The writer MCP currently exposes note-focused tools for safe curation work:
-
-- `read_note`
-- `write_note`
-- `upsert_frontmatter`
-- `append_links`
-- `move_note`
-- `archive_note`
-- `delete_note`
-- `organize_note_assets`
-- `move_asset`
-- `archive_asset`
-- `delete_asset`
-- `move_file`
-- `archive_file`
-- `delete_file`
-- `list_folder`
-- `stat_path`
-- `request_sync`
-
-Safety model:
-
-- content-editing tools operate on `.md` notes only
-- note paths are always relative to the vault root
-- `read_note` returns a `sha256` token; pass it back as `expected_sha256` on edits to avoid overwriting concurrent changes
-- asset lifecycle tools operate only on files or folders inside `NoteName_assets/`
-- generic file lifecycle tools operate on non-Markdown files anywhere else in the vault and reject internal stack paths like `/.ingest`, `/.markdown_vault_mcp`, `.obsidian`, `.trash`, `.git`, and `.webdav-sync-ready`
-- `organize_note_assets` rewrites explicit local asset links in a note and moves those files into its sibling `NoteName_assets/` folder
-- direct asset moves must stay within the same `NoteName_assets/` owner
-- moving, archiving, or deleting a note also carries its sibling `NoteName_assets/` folder when present
-- `delete_note` archives by default instead of hard-deleting
-- `delete_asset` archives by default instead of hard-deleting
-- `delete_file` archives by default instead of hard-deleting
-- hard delete stays disabled unless `CURATOR_ALLOW_HARD_DELETE=true`
-- successful write, move, archive, and delete operations also request an immediate mirror sync
-- `request_sync` is the only MCP way to force the mirror to refresh without performing a writer mutation (useful after a human edits the vault directly through NAS WebDAV)
-
 Recommended curator workflow:
 
-1. Discover candidate notes with the read-only MCP on `8019`
-2. Read target notes with the writer MCP to obtain fresh `sha256` values
-3. Apply localized changes such as frontmatter updates, link insertion, moves, or archival
-4. Wait a few seconds for the writer-triggered sync request to refresh the mirror, or call `request_sync` (writer MCP) followed by `reindex` or `build_embeddings` (read-only MCP) if you need a faster end-to-end refresh
-5. Re-query the read-only MCP to validate the new knowledge graph state
+1. Start with `consultar_contexto` on `curator-context-mcp` (`8021`) to get a curated first-pass answer to the question
+2. Use `markdown-vault-mcp` (`8019`) for any deeper inspection: broader search, full-note reads, backlinks, similar notes, or source validation
+3. Read target notes with `vault-writer-mcp` (`8020`) to obtain fresh `sha256` values before editing
+4. Apply localized changes such as frontmatter updates, link insertion, moves, or archival
+5. Wait a few seconds for the writer-triggered sync request to refresh the mirror, or call `request_sync` (writer MCP) followed by `reindex` or `build_embeddings` (read-only MCP) if you need a faster end-to-end refresh
+6. Re-query `curator-context-mcp` for the curated view or `markdown-vault-mcp` for direct source validation
 
 ## Updating the vault
 
