@@ -22,12 +22,14 @@ SEARCH_POOL = int(os.getenv("CONSULTAR_SEARCH_POOL", "50"))
 CAP_MOCS = int(os.getenv("CONSULTAR_CAP_MOCS", "5"))
 CAP_DECISIONES = int(os.getenv("CONSULTAR_CAP_DECISIONES", "5"))
 CAP_OBSOLETAS = int(os.getenv("CONSULTAR_CAP_OBSOLETAS", "5"))
+CAP_GENERALES = int(os.getenv("CONSULTAR_CAP_GENERALES", "5"))
 
 mcp = FastMCP(
     "curator-context-mcp",
     instructions=(
         "RAG-lite context tool. Una pregunta -> contexto curado por bucket "
-        "(heurísticas, decisiones, contradicciones, MOCs, obsoletas/baja confianza). "
+        "(heurísticas, decisiones, contradicciones, MOCs, notas generales, "
+        "obsoletas/baja confianza). "
         "Read-only: solo llama al reader via MCP-HTTP y postprocesa. No inventa."
     ),
     version="0.1.6",
@@ -197,7 +199,7 @@ def classify(path: str, snippet: str = "") -> str | None:
         is_moc = "mocs" in parts or any(
             seg == "moc" or seg.startswith("moc-") for seg in parts
         )
-        bucket = "mocs" if is_moc else None
+        bucket = "mocs" if is_moc else "notas_generales"
     # ponytail: si el snippet frontmatter indica obsoleto/baja confianza,
     # relega a bucket de fuentes débiles aunque el path sea heurística/decision.
     if snippet and (OBSOLETE_RE.search(snippet) or LOWCONF_RE.search(snippet)):
@@ -211,6 +213,7 @@ BUCKET_WEIGHTS = {
     "decisiones": 1.0,
     "contradicciones": 1.0,
     "obsoletas_o_baja_confianza": 1.0,
+    "notas_generales": 1.0,
 }
 
 
@@ -363,7 +366,12 @@ async def info(_: Request) -> JSONResponse:
         "service": "curator-context-mcp",
         "reader_mcp_url": READER_MCP_URL,
         "search_pool": SEARCH_POOL,
-        "caps": {"mocs": CAP_MOCS, "decisiones": CAP_DECISIONES, "obsoletas": CAP_OBSOLETAS},
+        "caps": {
+            "mocs": CAP_MOCS,
+            "decisiones": CAP_DECISIONES,
+            "obsoletas": CAP_OBSOLETAS,
+            "notas_generales": CAP_GENERALES,
+        },
     })
 
 
@@ -376,7 +384,7 @@ def consultar_contexto(
     umbral_similitud: float = 0.6,
 ) -> dict[str, Any]:
     """RAG-lite: una pregunta -> contexto curado por bucket (heurísticas, MOCs,
-    decisiones, contradicciones, obsoletas/baja confianza). Devuelve un dict
+    decisiones, contradicciones, notas generales, obsoletas/baja confianza). Devuelve un dict
     estructurado sin invención: si no sabe, lo dice. Latencia <2s por una sola
     llamada search híbrida al reader markdown-vault-mcp."""
     if not pregunta or not pregunta.strip():
@@ -415,6 +423,7 @@ def consultar_contexto(
         "heuristicas": [],
         "decisiones": [],
         "contradicciones": [],
+        "notas_generales": [],
         "obsoletas_o_baja_confianza": [],
         "metricas": metricas,
     }
@@ -486,7 +495,7 @@ def consultar_contexto(
     finally:
         client.close()
 
-    # Clasificar PRIMERO y descartar paths que no vayan a buckets válidos.
+    # Clasificar primero; solo se descartan paths explícitamente excluidos.
     # ponytail: normalizar sobre el subconjunto clasificado, no sobre los 50 hits.
     # Si el top RRF es una daily-note random y la heurística relevante está al
     # rank ~15, normalizar sobre el pool completo hunde la heurística (~0.3) por
@@ -503,9 +512,18 @@ def consultar_contexto(
             continue
         categorized.append({"_raw": h, "_bucket": bucket})
 
-    # Normalizar scores SOLO sobre el subconjunto clasificado.
+    # Las notas generales participan, pero no deben cambiar la escala de los
+    # buckets curatoriales cuando hay material curado en el mismo pool.
     subset = [c["_raw"] for c in categorized]
-    _maybe_normalize_scores(subset)
+    priority_subset = [
+        c["_raw"] for c in categorized if c["_bucket"] != "notas_generales"
+    ] or subset
+    has_priority = bool(priority_subset and priority_subset is not subset)
+    _maybe_normalize_scores(priority_subset)
+    if has_priority:
+        priority_max = max((h.get("score") or 0.0 for h in priority_subset), default=0.0)
+        for h in subset:
+            h["_score_norm"] = (h.get("score") or 0.0) / priority_max if priority_max > 0 else 0.0
     top_subset = sorted(
         (
             {
@@ -554,6 +572,7 @@ def consultar_contexto(
         "heuristicas": max_heuristicas,
         "decisiones": CAP_DECISIONES,
         "contradicciones": max_contradicciones,
+        "notas_generales": CAP_GENERALES,
         "obsoletas_o_baja_confianza": CAP_OBSOLETAS,
     }
     buckets: dict[str, list[dict[str, Any]]] = {k: [] for k in caps}
@@ -570,9 +589,10 @@ def consultar_contexto(
     decisiones = buckets["decisiones"]
     contradicciones = buckets["contradicciones"]
     mocs_relevantes = buckets["mocs"]
+    notas_generales = buckets["notas_generales"]
     obsoletas = buckets["obsoletas_o_baja_confianza"]
 
-    has_strong_curated = bool(heuristicas or decisiones or mocs_relevantes)
+    has_strong_curated = bool(heuristicas or decisiones or mocs_relevantes or notas_generales)
     has_only_weak = (
         not has_strong_curated
         and not contradicciones
@@ -601,6 +621,7 @@ def consultar_contexto(
             "heuristicas": [],
             "decisiones": [],
             "contradicciones": [],
+            "notas_generales": [],
             "obsoletas_o_baja_confianza": [],
             "metricas": metricas,
         }
@@ -622,6 +643,7 @@ def consultar_contexto(
         "heuristicas": heuristicas,
         "decisiones": decisiones,
         "contradicciones": contradicciones,
+        "notas_generales": notas_generales,
         "obsoletas_o_baja_confianza": obsoletas,
         "metricas": metricas,
     }
@@ -645,6 +667,9 @@ def _demo() -> None:
             ("Curator/inbox/i1.md", None),
             ("Nota baja confianza", "obsoletas_o_baja_confianza"),
         ], (f, b)
+    assert classify("Research/zigbee.md") == "notas_generales"
+    assert classify("Notas/manual.md") == "notas_generales"
+    assert classify("Curator/inbox/pendiente.md") is None
     _maybe_normalize_scores(fixtures)
     # Normalización por max del pool: top hit (inbox, score 0.95) debe quedar en 1.0.
     top = max(fixtures, key=lambda x: x.get("score") or 0.0)
@@ -776,21 +801,26 @@ def _demo() -> None:
         {"path": "Curator/heuristics/h1.md", "score": 0.040},
         {"path": "MOCs/cluster.md", "score": 0.030},
     ]
-    # Replicar el flujo del tool: clasificar -> descartar None -> normalizar subset.
+    # Replicar el flujo del tool: clasificar -> normalizar los buckets prioritarios.
     cat: list[dict[str, Any]] = []
     for h in pool:
         b = classify(h["path"], h.get("content", ""))
         if b is None:
             continue
         cat.append({"_raw": h, "_bucket": b})
-    sub = [c["_raw"] for c in cat]
+    sub = [c["_raw"] for c in cat if c["_bucket"] != "notas_generales"]
     _maybe_normalize_scores(sub)
+    priority_max = max(h["score"] for h in sub)
+    for c in cat:
+        c["_raw"]["_score_norm"] = c["_raw"]["score"] / priority_max
     # Heurística (raw 0.04) es el top del subconjunto (0.04 > 0.03 de MOC).
     # Tras re-normalizar: 1.0. Umbral 0.4 -> pass.
     heur_hit = next(c for c in cat if c["_bucket"] == "heuristicas")["_raw"]
     moc_hit = next(c for c in cat if c["_bucket"] == "mocs")["_raw"]
     assert heur_hit["_score_norm"] == 1.0, heur_hit["_score_norm"]
     assert abs(moc_hit["_score_norm"] - 0.75) < 1e-9, moc_hit["_score_norm"]
+    general_hit = next(c for c in cat if c["_bucket"] == "notas_generales")["_raw"]
+    assert general_hit["_score_norm"] > 1.0
     # Si normalizáramos sobre el pool completo (top 0.134 global), heuristic quedaría en 0.298.
     pool_copy = [dict(h) for h in pool]
     _maybe_normalize_scores(pool_copy)
@@ -861,8 +891,13 @@ def _demo() -> None:
         if b is None:
             continue
         zigbee_cat.append({"_raw": h, "_bucket": b})
-    zigbee_subset = [c["_raw"] for c in zigbee_cat]
+    zigbee_subset = [
+        c["_raw"] for c in zigbee_cat if c["_bucket"] != "notas_generales"
+    ]
     _maybe_normalize_scores(zigbee_subset)
+    priority_max = max(h["score"] for h in zigbee_subset)
+    for c in zigbee_cat:
+        c["_raw"]["_score_norm"] = c["_raw"]["score"] / priority_max
     filtered = []
     for c in zigbee_cat:
         h = c["_raw"]

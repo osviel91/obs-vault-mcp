@@ -220,6 +220,7 @@ Set it to the full Portainer stack webhook URL. Keep it in GitHub Secrets, not i
 | `INGEST_INTERVAL_SECONDS` | `600` |
 | `OCR_PDFS` | `true` |
 | `OCR_LANGS` | `spa+eng` |
+| `CONSULTAR_CAP_GENERALES` | `5` |
 | `CURATOR_ARCHIVE_ROOT` | `.curator-archive` |
 | `CURATOR_ALLOW_HARD_DELETE` | `false` |
 | `PUID` | `1000` |
@@ -335,6 +336,8 @@ Recommended role split inside Hermes:
 - `vault-writer-mcp`: write, move, archive, frontmatter updates, link insertion
 - `curator-context-mcp`: one-shot curated context per question (`consultar_contexto`)
 
+Before creating a note in a new location, agents must inspect the real vault structure with `list_folders`/`list_documents`, search for related MOCs or notes, and verify the candidate path with `list_folder` or `stat_path` on the writer. The writer can create missing parent folders, but it does not infer the user's taxonomy.
+
 ## MCP Endpoints And Tools
 
 This stack exposes three MCP servers with intentionally different responsibilities. Keeping that split clear is the easiest way to avoid accidental writes to the disposable mirror or unnecessary direct reads from WebDAV.
@@ -419,12 +422,13 @@ Safety model:
 
 ### `curator-context-mcp` (`8021`)
 
-This MCP is intentionally narrow: it exposes a single tool, `consultar_contexto`, as a deterministic first-pass context builder for curator work. This is the recommended MCP to use first when the user is asking for knowledge, prior decisions, heuristics, contradictions, or relevant MOCs about a topic.
+This MCP is intentionally narrow: it exposes a single tool, `consultar_contexto`, as a deterministic first-pass context builder for curator work. This is the recommended MCP to use first when the user is asking for knowledge, prior decisions, heuristics, contradictions, relevant MOCs, or general notes about a topic.
 
 What it is for:
 
 - taking one curator question and turning it into a structured context object
 - prioritizing heuristics and MOCs over weaker matches
+- including relevant general notes created manually or by other agents
 - separating decisions, contradictions, and obsolete or low-confidence material before the curator reads full notes
 - giving the curator an honest "not enough context" style answer instead of inventing content
 
@@ -441,6 +445,7 @@ The field names below are the literal response keys returned by the MCP:
 - `heuristicas`
 - `decisiones`
 - `contradicciones`
+- `notas_generales`
 - `obsoletas_o_baja_confianza`
 - `metricas`
 
@@ -448,6 +453,7 @@ Behavior notes:
 
 - It makes exactly one hybrid `search` call against `markdown-vault-mcp` and then post-processes the hits.
 - It classifies by path conventions such as `Curator/heuristics`, `Curator/decisions`, `Curator/contradictions`, `MOCs/...`, and `.curator-archive/...`.
+- It classifies other relevant notes as `notas_generales`, capped by `CONSULTAR_CAP_GENERALES` and without a score boost.
 - It discards inbox-style material like `Curator/inbox/**` and never invents summaries with an LLM.
 - It boosts heuristics and MOCs, relegates obsolete or low-confidence snippets to a weaker bucket, dedupes by path, and reports traceability data in `metricas`.
 

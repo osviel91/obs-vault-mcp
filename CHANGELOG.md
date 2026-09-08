@@ -10,6 +10,7 @@ Update `## Unreleased` on meaningful changes:
 
 ### Added
 - `curator-context-mcp` read-only MCP service on `8021` that turns one curator question into a deterministic curated context object from a single reader search.
+- General vault notes now appear in the `notas_generales` context bucket, while `Curator/inbox/**` remains excluded.
 - `vault-ingest` service for extracting non-Markdown vault documents into mirror-local Markdown shadow notes for indexing.
 - Asset lifecycle tools in `vault-writer-mcp` for moving, archiving, and deleting files stored under `NoteName_assets/`.
 - `organize_note_assets` in `vault-writer-mcp` to move referenced local assets into `NoteName_assets/` and rewrite the note links.
@@ -21,6 +22,7 @@ Update `## Unreleased` on meaningful changes:
 
 ### Docs
 - Clarified curator workflow expectations around reader reindexing and post-mutation verification.
+- Documented vault-structure discovery before selecting a note path.
 
 ### Chore
 - Added changelog tracking so feature, fix, doc, and ops changes have a single high-level history file.
